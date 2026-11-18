@@ -4,6 +4,7 @@
 #include "Record.h"
 #include "TraySpike.h"
 
+#include <clocale>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -108,9 +109,92 @@ bool StatsSink(const SpikeRecordHeader* hdr, const uint8_t* payload, void* user)
   return true;
 }
 
+// --- decode: interpret records with the MEASURED tray layout (Layout.h) ------
+
+struct DecodeCtx {
+  size_t index = 0;
+  size_t limit = 0;  // 0 = no limit
+  size_t decoded = 0;
+  size_t nonTray = 0;
+};
+
+const char* NimName(uint32_t op) {
+  switch (op) {
+    case 0: return "NIM_ADD";
+    case 1: return "NIM_MODIFY";
+    case 2: return "NIM_DELETE";
+    case 3: return "NIM_SETFOCUS";
+    case 4: return "NIM_SETVERSION";
+    default: return "NIM_?";
+  }
+}
+
+void PrintNifFlags(uint32_t f) {
+  if (f & 0x1) std::printf(" NIF_MESSAGE");
+  if (f & 0x2) std::printf(" NIF_ICON");
+  if (f & 0x4) std::printf(" NIF_TIP");
+  if (f & 0x8) std::printf(" NIF_STATE");
+  if (f & 0x10) std::printf(" NIF_INFO");
+  if (f & 0x20) std::printf(" NIF_GUID");
+  if (f & 0x40) std::printf(" NIF_REALTIME");
+  if (f & 0x80) std::printf(" NIF_SHOWTIP");
+  if (f & 0x100) std::printf(" NIF_STATICITEM");
+}
+
+bool DecodeSink(const SpikeRecordHeader* hdr, const uint8_t* payload, void* user) {
+  auto* ctx = static_cast<DecodeCtx*>(user);
+  if (hdr == nullptr) {
+    std::printf("  [sync lost: torn record]\n");
+    return true;
+  }
+  if (ctx->limit != 0 && ctx->index >= ctx->limit) return false;
+  ++ctx->index;
+
+  // Never decode a non-tray subtype as tray (plan Review Focus).
+  if (hdr->dwData != 1 || hdr->cbData < kTrayPayloadSize ||
+      RdU32(payload + 0) != kTrayMsgMagic) {
+    ++ctx->nonTray;
+    std::printf("#%zu [non-tray] dwData=%llu cbData=%u\n", ctx->index - 1,
+                static_cast<unsigned long long>(hdr->dwData), hdr->cbData);
+    return true;
+  }
+
+  const uint32_t op = RdU32(payload + kOffNim);
+  const uint32_t hwnd = RdU32(payload + kOffHwnd);
+  const uint32_t uid = RdU32(payload + kOffUid);
+  const uint32_t flags = RdU32(payload + kOffFlags);
+  const uint32_t cbmsg = RdU32(payload + kOffCallbackMsg);
+  const uint32_t icon = RdU32(payload + kOffIcon);
+  wchar_t tip[130] = {};  // worst case: 64 wchars, each escaped to two
+  size_t o = 0;
+  for (size_t i = 0; i < 64 && kOffTip + i * 2 + 1 < hdr->cbData && o + 2 < 130; ++i) {
+    const wchar_t ch = static_cast<wchar_t>(payload[kOffTip + i * 2] |
+                                            (payload[kOffTip + i * 2 + 1] << 8));
+    if (ch == L'\0') break;  // the tail after NUL is stale buffer bytes
+    if (ch == L'\r') {
+      tip[o++] = L'\\';
+      tip[o++] = L'r';
+    } else if (ch == L'\n') {
+      tip[o++] = L'\\';
+      tip[o++] = L'n';
+    } else if (ch < 0x20) {
+      tip[o++] = L'.';  // any other control char is noise
+    } else {
+      tip[o++] = ch;
+    }
+  }
+
+  ++ctx->decoded;
+  std::printf("#%zu %s hwnd=0x%X uid=%u flags=0x%X", ctx->index - 1, NimName(op),
+              hwnd, uid, flags);
+  PrintNifFlags(flags);
+  std::printf(" callback=0x%X icon=0x%X tip=\"%ls\"\n", cbmsg, icon, tip);
+  return true;
+}
+
 int PrintUsage() {
   std::printf(
-      "usage: TraySpikeDump [--in <path>] [--mode words|stats] [--limit N]\n"
+      "usage: TraySpikeDump [--in <path>] [--mode words|stats|decode] [--limit N]\n"
       "  default --in: %%TEMP%%\\TrayMirrorSpike.log, mode: words\n");
   return 1;
 }
@@ -118,6 +202,10 @@ int PrintUsage() {
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
+  // printf("%ls") converts wide chars through the current locale. In the
+  // default "C" locale MSVC cannot convert non-ASCII and silently drops the
+  // remainder of the formatted output; UTF-8 output keeps real tips intact.
+  std::setlocale(LC_ALL, ".UTF8");
   std::wstring path;
   wchar_t defaultPath[MAX_PATH];
   if (GetSpikeLogPathW(defaultPath, MAX_PATH)) path = defaultPath;
@@ -136,7 +224,7 @@ int wmain(int argc, wchar_t** argv) {
       return PrintUsage();
     }
   }
-  if (mode != L"words" && mode != L"stats") return PrintUsage();
+  if (mode != L"words" && mode != L"stats" && mode != L"decode") return PrintUsage();
 
   std::vector<uint8_t> data = ReadAllBytes(path);
   if (data.empty() && (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES)) {
@@ -145,7 +233,13 @@ int wmain(int argc, wchar_t** argv) {
   }
 
   size_t skipped = 0;
-  if (mode == L"words") {
+  if (mode == L"decode") {
+    DecodeCtx ctx;
+    ctx.limit = limit;
+    ParseRecords(data.data(), data.size(), DecodeSink, &ctx, &skipped);
+    std::printf("--- decoded tray: %zu, non-tray: %zu, skipped garbage: %zu\n",
+                ctx.decoded, ctx.nonTray, skipped);
+  } else if (mode == L"words") {
     WordsCtx ctx;
     ctx.limit = limit;
     const size_t n = ParseRecords(data.data(), data.size(), WordsSink, &ctx, &skipped);
