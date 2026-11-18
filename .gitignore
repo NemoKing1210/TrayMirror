@@ -1,0 +1,60 @@
+# --- Project documentation (maintained locally, not part of the repository) ---
+docs/
+
+# --- superpowers working artifacts (local, not part of the project) ---
+superpowers/
+.superpowers/
+
+# --- Build: out-of-source; directories are set by scripts/build.ps1 ---
+build*/
+out/
+bin/
+obj/
+
+# --- CMake / Ninja leftovers from an accidental in-source build ---
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+compile_commands.json
+.ninja_deps
+.ninja_log
+*.ninja
+
+# --- MSVC intermediate and debug files ---
+*.obj
+*.pdb
+*.ilk
+*.idb
+*.iobj
+*.ipdb
+*.exp
+*.tlog
+*.lastbuildstate
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+.vs/
+
+# --- Crash dumps (the spike hook lives inside explorer.exe) ---
+*.dmp
+*.mdmp
+*.stackdump
+
+# --- Spike logs (%TEMP%\TrayMirror*.log — in case of a local copy) ---
+*.log
+
+# --- OS and editors ---
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp
+.idea/
+
+# --- Local harness settings ---
+.claude/settings.local.json
