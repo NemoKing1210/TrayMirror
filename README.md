@@ -7,10 +7,11 @@ secondary monitors, aiming to be indistinguishable from the original: icons,
 tooltips, clicks, context menus and balloons.
 
 > **Project status: stage 0 — research spikes.**
-> The stage 0 code is complete and covered by tests; spike S1 returned **GO**
-> (tray `WM_COPYDATA` traffic is visible through `WH_CALLWNDPROCRET`). Runs on a
-> live Explorer are pending the owner's decision. There is no installable build
-> yet — see the [roadmap](#roadmap).
+> Spikes S1–S3 returned **GO**: tray `WM_COPYDATA` traffic is visible through
+> `WH_CALLWNDPROCRET` (S1), the payload layout is measured and
+> bitness-independent (S2), and `TaskbarCreated` is a safe initial-sync
+> primitive (S3). The stage 0 feasibility decision is pending. There is no
+> installable build yet — see the [roadmap](#roadmap).
 
 ---
 
@@ -145,7 +146,7 @@ buffer; the stage 1 protocol removes that blocking write from the tray thread.
 
 | Stage | Scope | Status |
 |---|---|---|
-| 0 | Research spikes S1–S9, feasibility decision | in progress — S1 GO, S2/S3 deferred |
+| 0 | Research spikes S1–S9, feasibility decision | in progress — S1–S3 GO, decision pending |
 | 1 | Skeleton: protocol, hook, host, CI, logging | planned |
 | 2 | Icon model, first overlay rendering | planned |
 | 3 | Native behavior: v4 protocol, menus, balloons, overflow | planned |
