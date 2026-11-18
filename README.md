@@ -6,12 +6,12 @@ TrayMirror mirrors the notification area (tray) from the primary taskbar onto
 secondary monitors, aiming to be indistinguishable from the original: icons,
 tooltips, clicks, context menus and balloons.
 
-> **Project status: stage 0 — research spikes.**
+> **Project status: stage 0 complete — feasibility GO.**
 > Spikes S1–S3 returned **GO**: tray `WM_COPYDATA` traffic is visible through
 > `WH_CALLWNDPROCRET` (S1), the payload layout is measured and
 > bitness-independent (S2), and `TaskbarCreated` is a safe initial-sync
-> primitive (S3). The stage 0 feasibility decision is pending. There is no
-> installable build yet — see the [roadmap](#roadmap).
+> primitive (S3). Stage 1 (protocol, host skeleton) is being planned. There is
+> no installable build yet — see the [roadmap](#roadmap).
 
 ---
 
@@ -146,8 +146,8 @@ buffer; the stage 1 protocol removes that blocking write from the tray thread.
 
 | Stage | Scope | Status |
 |---|---|---|
-| 0 | Research spikes S1–S9, feasibility decision | in progress — S1–S3 GO, decision pending |
-| 1 | Skeleton: protocol, hook, host, CI, logging | planned |
+| 0 | Research spikes S1–S9, feasibility decision | done — S1–S3 GO, verdict GO (S4–S9 folded into later stages) |
+| 1 | Skeleton: protocol, hook, host, CI, logging | in progress — being planned |
 | 2 | Icon model, first overlay rendering | planned |
 | 3 | Native behavior: v4 protocol, menus, balloons, overflow | planned |
 | 4 | Reliability: Explorer restarts, sleep, RDP, monitors, stress | planned |
