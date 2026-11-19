@@ -24,6 +24,14 @@ HWND DefaultFindTrayWnd() {
   return FindWindowW(L"Shell_TrayWnd", nullptr);
 }
 
+// The private (unnamed) stop events; injectable for tests via
+// HostAppConfig::createEvent.
+HANDLE MakeStopEvent(const HostAppConfig& config) {
+  return config.createEvent != nullptr ? config.createEvent()
+                                       : CreateEventW(nullptr, TRUE, FALSE,
+                                                      nullptr);
+}
+
 std::string Narrow(const wchar_t* s) {
   std::string out;
   for (; *s != L'\0'; ++s) {
@@ -356,10 +364,30 @@ int HostAppRun(const HostAppConfig& config) {
 
   auto log = InitHostLogging(config.logLevel);
 
+  // (2.5) The private stop events, created BEFORE anything is
+  // installed: a null handle would otherwise make the reader spin on
+  // WAIT_FAILED forever (fail-safe, never a hang; spec 2.3.5).
+  HANDLE readerStop = MakeStopEvent(config);
+  HANDLE mainStop = MakeStopEvent(config);
+  if (readerStop == nullptr || mainStop == nullptr) {
+    log->error("stop event creation failed (%lu) — refusing to start",
+               GetLastError());
+    if (readerStop != nullptr) {
+      CloseHandle(readerStop);
+    }
+    if (mainStop != nullptr) {
+      CloseHandle(mainStop);
+    }
+    CloseHandle(off);
+    return 4;
+  }
+
   const HWND tray =
       config.findTrayWnd != nullptr ? config.findTrayWnd() : DefaultFindTrayWnd();
   if (tray == nullptr) {
     log->error("Shell_TrayWnd not found — Explorer restarting or absent");
+    CloseHandle(readerStop);
+    CloseHandle(mainStop);
     CloseHandle(off);
     return 3;
   }
@@ -369,6 +397,8 @@ int HostAppRun(const HostAppConfig& config) {
   SharedRingHandle ring = {};
   if (!SharedRingCreate(&ring, GetCurrentProcessId(), err, 256)) {
     log->error("SharedRingCreate failed: {}", Narrow(err));
+    CloseHandle(readerStop);
+    CloseHandle(mainStop);
     CloseHandle(off);
     return 4;
   }
@@ -382,13 +412,14 @@ int HostAppRun(const HostAppConfig& config) {
   if (!HookInstallInstall(&hi, err, 256)) {
     log->error("hook install failed: {}", Narrow(err));
     SharedRingClose(&ring);
+    CloseHandle(readerStop);
+    CloseHandle(mainStop);
     CloseHandle(off);
     return 4;
   }
   log->info("hook installed (explorer pid {})", hi.explorerPid);
 
   // (5) The reader thread.
-  HANDLE readerStop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   const HANDLE signal = ring.signalEvent;
   std::thread reader([header = ring.header, ringBytes = ring.ring, signal,
                       readerStop, &log]() {
@@ -404,7 +435,6 @@ int HostAppRun(const HostAppConfig& config) {
 
   // Event-driven idle (spec 12.9: no polling): the console handler sets
   // the stop event; --duration bounds the wait for scripted runs.
-  HANDLE mainStop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   g_stopEvent = mainStop;
   SetConsoleCtrlHandler(ConsoleCtrl, TRUE);
   if (config.durationSec != 0) {

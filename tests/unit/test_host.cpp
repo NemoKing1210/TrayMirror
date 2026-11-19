@@ -90,6 +90,30 @@ TEST(HostApp, DisableHookArmsKillSwitch) {
   CloseHandle(off);
 }
 
+TEST(HostApp, StopEventCreationFailureIsCleanExit4) {
+  // Handle exhaustion: the stop events cannot be created. The host must
+  // refuse to start with a clean exit — a null handle would make the
+  // reader spin on WAIT_FAILED forever (fail-safe, never a hang; spec
+  // 2.3.5). The tray finder is stubbed so the RED run fails on the exit
+  // code (3) and can never approach a real hook install.
+  HostAppConfig cfg;
+  cfg.findTrayWnd = []() -> HWND { return nullptr; };
+  cfg.createEvent = []() -> HANDLE { return nullptr; };
+  EXPECT_EQ(HostAppRun(cfg), 4);
+}
+
+TEST(HostApp, MainStopCreationFailureIsCleanExit4) {
+  static int calls = 0;
+  calls = 0;
+  HostAppConfig cfg;
+  cfg.findTrayWnd = []() -> HWND { return nullptr; };
+  cfg.createEvent = []() -> HANDLE {
+    return ++calls == 1 ? CreateEventW(nullptr, TRUE, FALSE, nullptr)
+                        : nullptr;
+  };
+  EXPECT_EQ(HostAppRun(cfg), 4);
+}
+
 struct SinkRecord {
   uint32_t type = 0;
   uint32_t nim = 0;

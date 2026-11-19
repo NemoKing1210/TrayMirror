@@ -17,6 +17,10 @@ struct HostAppConfig {
 
   // Injectable for tests; the default finds the real Shell_TrayWnd.
   HWND (*findTrayWnd)() = nullptr;
+  // Injectable for tests; nullptr means plain CreateEventW. A null
+  // return simulates handle exhaustion: the host must refuse to start
+  // (clean exit 4), never spin or hang on WAIT_FAILED.
+  HANDLE (*createEvent)() = nullptr;
 };
 
 // Parses argv[1..argc-1]. Returns false on unknown flags or missing
