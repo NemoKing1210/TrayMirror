@@ -356,3 +356,42 @@ TEST_F(ModelTest, LastSeenAdvancesOnEveryApply) {
   EXPECT_GE(model.icons()[0].lastSeen, first);
   EXPECT_STREQ(model.icons()[0].tip.c_str(), L"tip-b");
 }
+
+// A tray icon whose owner window is gone can never be clicked again
+// (spec 4.4): removal drops the model entry and the icon copy with it.
+TEST(ModelRemoval, ReleasesTheIconCopy) {
+  g_copyCalls = 0;
+  g_destroyCalls = 0;
+  traymirror::TrayModel model(
+      traymirror::IconOps{.copy = CopyCounting, .destroy = DestroyCounting},
+      &PidCounting, &ExeCounting);
+  constexpr uint32_t kNimAdd = 0;
+  ASSERT_TRUE(model.Apply(MakeMsg(kNimAdd, 0x1111, 1, kNifIcon)));
+  ASSERT_EQ(g_destroyCalls, 0);
+
+  EXPECT_TRUE(model.RemoveOwner(traymirror::SignExtendHwnd(0x1111)));
+  EXPECT_TRUE(model.icons().empty());
+  EXPECT_EQ(g_destroyCalls, 1);  // the copy, released with the entry
+  EXPECT_FALSE(model.RemoveOwner(traymirror::SignExtendHwnd(0x1111)));  // already gone
+  EXPECT_EQ(g_destroyCalls, 1);
+}
+
+TEST(ModelRemoval, KeepsOtherOwners) {
+  g_copyCalls = 0;
+  g_destroyCalls = 0;
+  traymirror::TrayModel model(
+      traymirror::IconOps{.copy = CopyCounting, .destroy = DestroyCounting},
+      &PidCounting, &ExeCounting);
+  constexpr uint32_t kNimAdd = 0;
+  ASSERT_TRUE(model.Apply(MakeMsg(kNimAdd, 0x1111, 1, kNifIcon)));
+  ASSERT_TRUE(model.Apply(MakeMsg(kNimAdd, 0x2222, 2, kNifIcon)));
+  ASSERT_EQ(model.icons().size(), 2U);
+
+  EXPECT_TRUE(model.RemoveOwner(traymirror::SignExtendHwnd(0x1111)));
+  ASSERT_EQ(model.icons().size(), 1U);
+  EXPECT_EQ(model.icons()[0].key.uid, 2U);
+  EXPECT_EQ(g_destroyCalls, 1);
+
+  EXPECT_FALSE(model.RemoveOwner(nullptr));  // no owner, nothing to do
+  EXPECT_EQ(model.icons().size(), 1U);
+}

@@ -170,6 +170,39 @@ bool TrayModel::SetPromotion(const IconKey& key, bool promoted) {
   return true;
 }
 
+bool TrayModel::RemoveOwner(HWND owner) {
+  if (owner == nullptr) {
+    return false;
+  }
+  bool changed = false;
+  for (auto it = icons_.begin(); it != icons_.end();) {
+    if (it->ownerHwnd != owner) {
+      ++it;
+      continue;
+    }
+    DestroyIconCopy(&*it);
+    it = icons_.erase(it);
+    changed = true;
+  }
+  // The window is gone: its pid and executable path must not be reused
+  // when the handle is recycled by another window.
+  for (auto it = owners_.begin(); it != owners_.end();) {
+    if (it->first == owner) {
+      it = owners_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  return changed;
+}
+
+bool TrayModel::RemoveIfOwnerGone(HWND owner) {
+  if (owner == nullptr || IsWindow(owner) != FALSE) {
+    return false;
+  }
+  return RemoveOwner(owner);
+}
+
 size_t TrayModel::IndexOf(const IconKey& key) const {
   for (size_t i = 0; i < icons_.size(); ++i) {
     if (icons_[i].key == key) {

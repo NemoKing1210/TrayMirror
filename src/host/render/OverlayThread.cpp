@@ -170,6 +170,17 @@ void OverlayThread::Run() {
       watcher_.reset();
     }
   }
+  // Dead owner windows (spec 4.4): an icon whose window is gone can
+  // never be clicked again, so it leaves the model and the strip.
+  deadIcons_ = std::make_unique<DeadIconWatcher>([this](HWND owner) {
+    if (model_ != nullptr && model_->RemoveOwner(owner)) {
+      PushModelToOverlays();
+    }
+  });
+  if (!deadIcons_->Start()) {
+    log->warn("dead-icon watcher unavailable: stale icons stay on the strip");
+    deadIcons_.reset();
+  }
   BuildOverlays();
   if (inbox_ != nullptr) {
     inbox_->SetNudge(hwnd, kMsgInbox);
@@ -186,6 +197,7 @@ void OverlayThread::Run() {
   overlays_.clear();
   // Stop the registry thread before the window it posts to disappears.
   watcher_.reset();
+  deadIcons_.reset();
   dispatcher_.reset();
   uiHwnd_.store(nullptr);
 }
@@ -283,9 +295,18 @@ bool OverlayThread::ApplyPromotionFromStore() {
 }
 
 void OverlayThread::PostGesture(const DispatchCall& call) {
-  if (dispatcher_ != nullptr) {
-    dispatcher_->Post(call);
+  if (dispatcher_ == nullptr) {
+    return;
   }
+  // Lazy check (spec 4.4): the owner may have died since the last
+  // message, and a gesture replayed to a destroyed window is lost.
+  if (call.target.owner != nullptr && IsWindow(call.target.owner) == FALSE) {
+    if (model_ != nullptr && model_->RemoveIfOwnerGone(call.target.owner)) {
+      PushModelToOverlays();
+    }
+    return;
+  }
+  dispatcher_->Post(call);
 }
 
 size_t OverlayThread::CountVisibleIcons() const {

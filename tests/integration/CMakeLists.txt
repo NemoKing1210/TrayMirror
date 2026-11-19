@@ -11,7 +11,8 @@ add_test(NAME traymirror_selftest COMMAND traymirror_selftest)
 
 find_package(GTest CONFIG REQUIRED)
 
-add_executable(traymirror_integration test_overlay.cpp test_flyout.cpp)
+add_executable(traymirror_integration test_overlay.cpp test_flyout.cpp
+                                 test_dead_icons.cpp)
 set_target_properties(traymirror_integration PROPERTIES CXX_STANDARD 20)
 target_link_libraries(traymirror_integration PRIVATE traymirror_host
                                                     GTest::gtest_main)

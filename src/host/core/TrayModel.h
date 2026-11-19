@@ -95,6 +95,13 @@ class TrayModel {
   // the strip and the overflow).
   bool SetPromotion(const IconKey& key, bool promoted);
 
+  // Dead owners (spec 4.4): drops every icon of `owner` and the cached
+  // identity of the window. Returns true iff the visible set changed.
+  bool RemoveOwner(HWND owner);
+  // The lazy check before a gesture is replayed: the window may have
+  // died without its event having been processed yet.
+  bool RemoveIfOwnerGone(HWND owner);
+
  private:
   struct OwnerInfo {
     DWORD pid = 0;

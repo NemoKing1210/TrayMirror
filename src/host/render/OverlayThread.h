@@ -3,6 +3,7 @@
 // inbox and posts kMsgInbox to uiHwnd(). Event-driven only: no timers.
 #pragma once
 
+#include "core/DeadIconWatcher.h"
 #include "core/ModelInbox.h"
 #include "core/PromotionStore.h"
 #include "core/TrayModel.h"
@@ -79,6 +80,9 @@ class OverlayThread {
   // watcher means the store is unavailable and every icon stays on the
   // strip.
   std::unique_ptr<PromotionWatcher> watcher_;
+  // EVENT_OBJECT_DESTROY, installed on this thread: its events arrive on
+  // this message loop, so the callback may touch the model directly.
+  std::unique_ptr<DeadIconWatcher> deadIcons_;
   // The icon count the promotion store was last applied against; a new
   // icon needs its registry entry read, a modify does not.
   size_t promotionIconCount_ = 0;
