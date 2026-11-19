@@ -7,7 +7,12 @@ if(TRAYMIRROR_CLANG_TIDY)
   # CMake's clang-tidy launch does not forward the compiler's /std flag;
   # without it clang-tidy parses as C++14 and rejects C++20 constructs.
   # In clang-cl mode the pass-through spelling is /clang:-std=c++20.
-  set(CMAKE_CXX_CLANG_TIDY "${TRAYMIRROR_CLANG_TIDY};--extra-arg=/clang:-std=c++20")
+  # NOTE: exceptions cannot be enabled through /clang: pass-through —
+  # cl mode appends its default -fno-exceptions after all pass-through
+  # args, so try/catch is a hard error under tidy. Source files checked
+  # by tidy must not use try/catch (ledger ruling, task 8).
+  set(CMAKE_CXX_CLANG_TIDY
+      "${TRAYMIRROR_CLANG_TIDY};--extra-arg=/clang:-std=c++20")
 endif()
 
 # Spec 2.5 repository layout: proto (protocol library), hook (in-Explorer

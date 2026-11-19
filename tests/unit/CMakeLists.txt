@@ -1,7 +1,11 @@
 find_package(GTest CONFIG REQUIRED)
 
 add_executable(traymirror_unit test_proto.cpp test_ring.cpp test_sharedring.cpp
-               test_traypayload.cpp test_hook.cpp)
+               test_traypayload.cpp test_hook.cpp test_host.cpp)
+# gtest's imported targets carry CXX_STANDARD 17; raising the consumer's
+# standard avoids the "/std:c++17 redefined to /std:c++20" command-line
+# warning (the repo norm is zero warnings).
+set_target_properties(traymirror_unit PROPERTIES CXX_STANDARD 20)
 target_link_libraries(traymirror_unit PRIVATE GTest::gtest_main traymirror_proto
                                              traymirror_host)
 target_compile_definitions(

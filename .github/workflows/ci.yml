@@ -23,3 +23,8 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+      # Spec 12.1: the hook DLL must be verified in-process before any
+      # installation. This step never touches a live Explorer.
+      - name: Selftest
+        run: build/src/host/TrayMirror.exe --selftest
