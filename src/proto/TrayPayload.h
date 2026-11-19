@@ -7,6 +7,8 @@
 // of raw copy data.
 #pragma once
 
+#include <guiddef.h>
+
 #include <cstdint>
 
 // Measured constants (spike S2).
@@ -21,6 +23,18 @@ inline constexpr size_t kTrayOffCallbackMsg = 24;
 inline constexpr size_t kTrayOffIcon = 28;             // u32 (icon handle)
 inline constexpr size_t kTrayOffTip = 32;              // UTF-16, 128 wchars
 
+// Measured in the stage 2 field capture
+// (docs/spikes/05-stage2-payload-fields.md, plan task 1): the payload
+// carries the 32-bit-handle NOTIFYICONDATAW at data offset 12. Marker
+// values confirmed each offset on the live tray.
+inline constexpr size_t kTrayOffState = 288;      // dwState (NIS_* bits)
+inline constexpr size_t kTrayOffStateMask = 292;  // dwStateMask
+inline constexpr size_t kTrayOffVersion = 808;    // uVersion (NIM_SETVERSION)
+inline constexpr size_t kTrayOffGuid = 944;       // guidItem, 16 bytes
+
+// NIF_GUID: the icon's key is guidItem, not (hWnd, uID).
+inline constexpr uint32_t kNifGuid = 0x20;
+
 struct TrayMessage {
   uint32_t nim = 0;
   uint32_t hwnd = 0;
@@ -30,6 +44,11 @@ struct TrayMessage {
   uint32_t icon = 0;
   wchar_t tip[130] = {};  // \r and \n escaped, other control chars '.'
   bool truncated = false;  // cbData claims more than the payload carries
+  uint32_t state = 0;      // dwState, meaningful with NIF_STATE
+  uint32_t stateMask = 0;  // dwStateMask
+  uint32_t version = 0;    // uVersion (NIM_SETVERSION): 0 or 4
+  GUID guid = {};          // valid iff hasGuid
+  bool hasGuid = false;    // flags & kNifGuid
 };
 
 enum class TrayDecodeStatus : uint8_t {

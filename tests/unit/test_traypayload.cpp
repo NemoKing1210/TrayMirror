@@ -138,4 +138,50 @@ TEST(TrayPayload, TinyPayloadIsInvalid) {
             TrayDecodeStatus::Invalid);
 }
 
+TEST(TrayPayloadFields, DecodesStateMaskVersionGuid) {
+  // Offsets measured in plan task 1 (docs/spikes/05-stage2-payload-fields.md):
+  // the markers below are the ones the live capture found at those offsets.
+  std::vector<uint8_t> p = MakeTrayPayload(0, L"guid-icon");
+  PutU32(p, kCopydataHeader + kTrayOffState, 0x1);      // NIS_HIDDEN
+  PutU32(p, kCopydataHeader + kTrayOffStateMask, 0x1);
+  PutU32(p, kCopydataHeader + kTrayOffVersion, 4);
+  const GUID kMarker = {0x11223344,
+                        0x5566,
+                        0x7788,
+                        {0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00}};
+  memcpy(p.data() + kCopydataHeader + kTrayOffGuid, &kMarker, sizeof(kMarker));
+  PutU32(p, kCopydataHeader + kTrayOffFlags, kNifGuid);
+
+  TrayMessage msg = {};
+  ASSERT_EQ(DecodeTrayPayload(p.data(), static_cast<uint32_t>(p.size()),
+                              &msg),
+            TrayDecodeStatus::Ok);
+  EXPECT_EQ(msg.state, 0x1u);
+  EXPECT_EQ(msg.stateMask, 0x1u);
+  EXPECT_EQ(msg.version, 4u);
+  EXPECT_TRUE(msg.hasGuid);
+  EXPECT_EQ(msg.guid.Data1, 0x11223344u);
+  EXPECT_EQ(msg.guid.Data2, 0x5566u);
+  EXPECT_EQ(msg.guid.Data3, 0x7788u);
+  EXPECT_EQ(msg.guid.Data4[0], 0x99);
+  EXPECT_EQ(msg.guid.Data4[7], 0x00);
+}
+
+TEST(TrayPayloadFields, GuidIgnoredWithoutNifGuid) {
+  // The default fixture flags (0xA4) include NIF_GUID; clear it to prove
+  // the decoder keys off the flag, not the bytes.
+  std::vector<uint8_t> p = MakeTrayPayload(0, L"no-guid");
+  PutU32(p, kCopydataHeader + kTrayOffFlags, 0x84);  // TIP | SHOWTIP
+  const GUID kMarker = {0x11223344, 0x5566, 0x7788, {0x99}};
+  memcpy(p.data() + kCopydataHeader + kTrayOffGuid, &kMarker, sizeof(kMarker));
+
+  TrayMessage msg = {};
+  ASSERT_EQ(DecodeTrayPayload(p.data(), static_cast<uint32_t>(p.size()),
+                              &msg),
+            TrayDecodeStatus::Ok);
+  EXPECT_FALSE(msg.hasGuid);
+  EXPECT_EQ(msg.guid.Data1, 0u);
+  EXPECT_EQ(msg.guid.Data4[0], 0u);
+}
+
 }  // namespace

@@ -38,6 +38,15 @@ TrayDecodeStatus DecodeTrayPayload(const uint8_t* payload,
   out->flags = RdU32(data + kTrayOffFlags);
   out->callbackMsg = RdU32(data + kTrayOffCallbackMsg);
   out->icon = RdU32(data + kTrayOffIcon);
+  out->state = RdU32(data + kTrayOffState);
+  out->stateMask = RdU32(data + kTrayOffStateMask);
+  out->version = RdU32(data + kTrayOffVersion);
+  out->hasGuid = (out->flags & kNifGuid) != 0;
+  if (out->hasGuid) {
+    memcpy(&out->guid, data + kTrayOffGuid, sizeof(out->guid));
+  } else {
+    out->guid = GUID{};
+  }
   out->truncated = RdU32(payload + 4) > dataSize;
 
   // Tip: up to 64 wchars inside the measured payload, NUL-terminated; the
