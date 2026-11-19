@@ -46,6 +46,31 @@ TEST(MonitorGeometry, NoTaskbarYieldsEmptyRect) {
   EXPECT_EQ(strip.bottom, 0);
 }
 
+TEST(MonitorGeometry, StripNeverCoversTaskList) {
+  // The task list has grown left-to-right into the space the strip
+  // would occupy: the strip must start at the task list's right edge,
+  // or its topmost window would swallow clicks meant for task buttons.
+  MonitorTaskbar mt = MakeTaskbar();
+  mt.taskListRight = 1700;
+  const RECT strip = ComputeOverlayStripRect(mt, 200);
+  EXPECT_EQ(strip.left, 1700);
+  EXPECT_EQ(strip.right, 1800);
+}
+
+TEST(MonitorGeometry, TaskListReachingTheClockLeavesNoStrip) {
+  MonitorTaskbar mt = MakeTaskbar();
+  mt.taskListRight = 1800;
+  const RECT strip = ComputeOverlayStripRect(mt, 200);
+  EXPECT_EQ(strip.right, 0);  // all-zero: the caller creates no overlay
+  EXPECT_EQ(strip.left, 0);
+}
+
+TEST(MonitorGeometry, UnknownTaskListFallsBackToTheWidth) {
+  const MonitorTaskbar mt = MakeTaskbar();  // taskListRight == 0
+  const RECT strip = ComputeOverlayStripRect(mt, 200);
+  EXPECT_EQ(strip.left, 1600);
+}
+
 TEST(MonitorGeometry, IconPxByDpi) {
   EXPECT_EQ(IconPxForDpi(96), 16);
   EXPECT_EQ(IconPxForDpi(120), 20);

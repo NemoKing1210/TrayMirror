@@ -238,15 +238,35 @@ $emuJob = Start-Process -FilePath $Emu64 -ArgumentList 'add', '--tip', 's2-click
 
 $deadline = (Get-Date).AddSeconds($ClickWaitSec)
 $dispatched = @()
+$leftClicks = @()
+$doubleClicks = @()
+$rightClicks = @()
 while ((Get-Date) -lt $deadline) {
-    $dispatched = Get-LogLines 'dispatch:'
-    if ($dispatched.Count -ge 4) { break }
+    # Only clicks count: hover moves are logged too, and a pointer crossing
+    # the icon would otherwise satisfy the criterion without a click.
+    # Event numbers are TrayEvent order: 0/1 left down/up, 2 double,
+    # 3/4 right down/up, 5 move, 6 leave.
+    $dispatched = Get-LogLines 'dispatch: event=[0-4] '
+    $leftClicks = @($dispatched | Where-Object { $_ -match 'dispatch: event=[01] ' })
+    $doubleClicks = @($dispatched | Where-Object { $_ -match 'dispatch: event=2 ' })
+    $rightClicks = @($dispatched | Where-Object { $_ -match 'dispatch: event=[34] ' })
+    if ($leftClicks.Count -ge 2 -and $doubleClicks.Count -ge 1 -and
+        $rightClicks.Count -ge 1) {
+        break
+    }
     Start-Sleep -Seconds 2
 }
-Write-Log "host log shows $($dispatched.Count) dispatched calls"
+Write-Log ("dispatched clicks: left={0} double={1} right={2}" -f `
+    $leftClicks.Count, $doubleClicks.Count, $rightClicks.Count)
 foreach ($line in $dispatched) { Write-Log "  $line" }
-if ($dispatched.Count -lt 4) {
-    Fail "fewer than 4 dispatched calls - the click checklist did not complete"
+if ($leftClicks.Count -lt 2) {
+    Fail "fewer than 2 left-click events dispatched ($($leftClicks.Count))"
+}
+if ($doubleClicks.Count -lt 1) {
+    Fail 'no double-click event dispatched'
+}
+if ($rightClicks.Count -lt 1) {
+    Fail 'no right-click event dispatched'
 }
 Wait-HostExit $emuJob 10
 Wait-HostExit $hostProc ($ClickWaitSec + 60)

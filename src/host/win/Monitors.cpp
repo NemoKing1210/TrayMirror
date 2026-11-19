@@ -74,10 +74,10 @@ class ComApartment {
   HRESULT hr_;
 };
 
-// The taskbar clock's rect via UIA (spec 6.1 names UIA for taskbar
+// One taskbar element's rect via UIA (spec 6.1 names UIA for taskbar
 // elements). False when the element is absent or a UIA call fails; the
-// caller then falls back to the measured reserve.
-bool UiaClockRect(HWND taskbar, RECT* out) {
+// caller then falls back to the measured reserves.
+bool UiaElementRect(HWND taskbar, const wchar_t* className, RECT* out) {
   ComApartment com;
   if (!com.ok()) {
     return false;
@@ -96,7 +96,7 @@ bool UiaClockRect(HWND taskbar, RECT* out) {
   VARIANT cls;
   VariantInit(&cls);
   cls.vt = VT_BSTR;
-  cls.bstrVal = SysAllocString(L"SystemTray.OmniButton");
+  cls.bstrVal = SysAllocString(className);
   if (cls.bstrVal == nullptr) {
     return false;
   }
@@ -107,14 +107,14 @@ bool UiaClockRect(HWND taskbar, RECT* out) {
   if (FAILED(created) != 0 || condition == nullptr) {
     return false;
   }
-  ComPtr<IUIAutomationElement> clock;
+  ComPtr<IUIAutomationElement> element;
   if (FAILED(window->FindFirst(TreeScope_Descendants, condition.Get(),
-                               clock.GetAddressOf())) != 0 ||
-      clock == nullptr) {
+                               element.GetAddressOf())) != 0 ||
+      element == nullptr) {
     return false;
   }
   RECT rect = {};
-  if (FAILED(clock->get_CurrentBoundingRectangle(&rect)) != 0) {
+  if (FAILED(element->get_CurrentBoundingRectangle(&rect)) != 0) {
     return false;
   }
   if (rect.right <= rect.left || rect.bottom <= rect.top) {
@@ -156,7 +156,7 @@ std::vector<MonitorTaskbar> DefaultEnumerateSecondaryMonitors() {
       }
       mt.hasTaskbar = true;
       mt.taskbarRect = taskbarRect;
-      if (UiaClockRect(taskbar, &mt.clockRect)) {
+      if (UiaElementRect(taskbar, L"SystemTray.OmniButton", &mt.clockRect)) {
         log->info("monitor ({},{}): taskbar clock at ({},{})", entry.rect.left,
                   entry.rect.top, mt.clockRect.left, mt.clockRect.top);
       } else {
@@ -171,6 +171,12 @@ std::vector<MonitorTaskbar> DefaultEnumerateSecondaryMonitors() {
                         .bottom = taskbarRect.bottom};
         log->warn("monitor ({},{}): clock element not found; reserving {} px",
                   entry.rect.left, entry.rect.top, reserve);
+      }
+      RECT taskList = {};
+      if (UiaElementRect(taskbar, L"MSTaskListWClass", &taskList)) {
+        mt.taskListRight = taskList.right;
+        log->info("monitor ({},{}): task list ends at x={}", entry.rect.left,
+                  entry.rect.top, mt.taskListRight);
       }
       break;
     }
@@ -192,8 +198,16 @@ RECT ComputeOverlayStripRect(const MonitorTaskbar& mt, int widthPx) {
     right = mt.monitorRect.right;
   }
   LONG left = right - widthPx;
+  // The overlay is topmost: anything under it cannot be clicked. Stop at
+  // the task list's right edge when it could be measured.
+  if (mt.taskListRight > 0 && left < mt.taskListRight) {
+    left = mt.taskListRight;
+  }
   if (left < mt.monitorRect.left) {
     left = mt.monitorRect.left;
+  }
+  if (left >= right) {
+    return RECT{};  // no room between the task list and the clock
   }
   strip.left = left;
   strip.right = right;
