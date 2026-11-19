@@ -1,0 +1,80 @@
+// One overlay strip per secondary taskbar (spec 6.1/6.2): a topmost,
+// never-activated borderless window over the taskbar row, drawn with
+// Direct2D into a DirectComposition surface. Everything is created on
+// the overlay thread; the model stays off this type.
+#pragma once
+
+#include <windows.h>
+
+#include <d2d1_1.h>
+#include <dcomp.h>
+#include <d3d11.h>
+#include <dxgi1_2.h>
+#include <wrl/client.h>
+
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace traymirror {
+
+// A non-owning view of one model icon, as the overlay renders it. The
+// icon handle belongs to the model and outlives the view.
+struct IconView {
+  HICON icon = nullptr;
+  UINT serial = 0;
+  std::wstring tip;
+};
+
+class Overlay {
+ public:
+  // `onGeometryInvalidated` runs on the overlay thread when the window
+  // must be rebuilt (DPI change); it must only post, never rebuild here.
+  static std::unique_ptr<Overlay> Create(
+      HMONITOR monitor, const RECT& strip,
+      std::function<void()> onGeometryInvalidated = {});
+  ~Overlay();
+  Overlay(const Overlay&) = delete;
+  Overlay& operator=(const Overlay&) = delete;
+
+  [[nodiscard]] HWND hwnd() const noexcept { return hwnd_; }
+  // Replaces the icon list; marks the strip dirty. HICONs are borrowed.
+  void SetIcons(std::vector<IconView> icons);
+  // Redraws only when dirty (spec 6.2: no timer, no polling).
+  void Render();
+
+ private:
+  Overlay() = default;
+
+  static bool EnsureClass();
+  static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wparam,
+                                  LPARAM lparam);
+  LRESULT HandleMessage(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
+
+  bool InitComposition();
+  void ReleaseComposition();
+  void ApplyTheme();
+
+  HWND hwnd_ = nullptr;
+  HMONITOR monitor_ = nullptr;
+  RECT strip_ = {};
+  bool dirty_ = true;
+  bool dark_ = false;
+  std::vector<IconView> icons_;
+  std::function<void()> onGeometryInvalidated_;
+
+  Microsoft::WRL::ComPtr<ID3D11Device> d3d_;
+  Microsoft::WRL::ComPtr<ID2D1Factory1> d2dFactory_;
+  Microsoft::WRL::ComPtr<ID2D1Device> d2dDevice_;
+  Microsoft::WRL::ComPtr<ID2D1DeviceContext> d2dContext_;
+  // Created via DCompositionCreateDevice2 with the D2D device: only such
+  // a device lets BeginDraw hand back an ID2D1DeviceContext (docs are
+  // explicit that the v1 device yields E_INVALIDARG).
+  Microsoft::WRL::ComPtr<IDCompositionDesktopDevice> dcomp_;
+  Microsoft::WRL::ComPtr<IDCompositionTarget> dcompTarget_;
+  Microsoft::WRL::ComPtr<IDCompositionVisual2> dcompVisual_;
+  Microsoft::WRL::ComPtr<IDCompositionSurface> surface_;
+};
+
+}  // namespace traymirror

@@ -8,6 +8,9 @@
 #include "RingReader.h"
 #include "TrayPayload.h"
 #include "core/InitialSync.h"
+#include "core/ModelInbox.h"
+#include "core/TrayModel.h"
+#include "render/OverlayThread.h"
 #include "ipc/SharedRing.h"
 #include "ipc/SingleInstance.h"
 
@@ -434,6 +437,17 @@ int HostAppRun(const HostAppConfig& config) {
   }
   log->info("hook installed (explorer pid {})", hi.explorerPid);
 
+  // (4.5) The model and the overlay strips (spec 4.2, 6.1). The UI
+  // thread owns both; the reader hands records over through the inbox.
+  // A failed UI thread degrades to model-only logging rather than
+  // aborting the session.
+  traymirror::TrayModel model;
+  traymirror::ModelInbox inbox;
+  traymirror::OverlayThread overlay;
+  if (!overlay.Start(&inbox, &model)) {
+    log->error("overlay thread failed to start — model-only session");
+  }
+
   // (5) The reader thread and initial synchronization (spec 4.3): the
   // manual-resync event (auto-reset: one signal, one sync) and the
   // TaskbarCreated broadcast that the startup sync and every later
@@ -449,14 +463,15 @@ int HostAppRun(const HostAppConfig& config) {
       traymirror::DefaultTaskbarCreatedBroadcast();
   const HANDLE signal = ring.signalEvent;
   std::thread reader([header = ring.header, ringBytes = ring.ring, signal,
-                      readerStop, resyncEvent, broadcast, &log]() {
+                      readerStop, resyncEvent, broadcast, &log, &inbox]() {
     ReaderLoop(
         header, ringBytes, signal, readerStop,
-        [&log](const RingRecordHeader&, const TrayMessage& msg) {
+        [&log, &inbox](const RingRecordHeader&, const TrayMessage& msg) {
           log->info("NIM_{} hwnd={:#x} uid={:#x} flags={:#x} "
                     "callback={:#x} icon={:#x} tip=\"{}\"",
                     NimName(msg.nim), msg.hwnd, msg.uid, msg.flags,
                     msg.callbackMsg, msg.icon, Narrow(msg.tip));
+          inbox.Push(msg);
         },
         resyncEvent, [broadcast, &log]() {
           broadcast();
@@ -500,6 +515,9 @@ int HostAppRun(const HostAppConfig& config) {
   if (resyncEvent != nullptr) {
     CloseHandle(resyncEvent);
   }
+  // The UI thread stops after the reader is drained: no producer is
+  // left, so the overlays can be torn down without synchronization.
+  overlay.Stop();
 
   // Self-verify the unload: the DLL must leave explorer.exe's module
   // list (the acceptance's own check).

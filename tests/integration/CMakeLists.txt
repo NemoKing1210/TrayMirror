@@ -8,3 +8,11 @@ add_test(NAME traymirror_hook_latch COMMAND traymirror_hook_latch)
 add_executable(traymirror_selftest test_selftest.cpp)
 target_link_libraries(traymirror_selftest PRIVATE traymirror_host)
 add_test(NAME traymirror_selftest COMMAND traymirror_selftest)
+
+find_package(GTest CONFIG REQUIRED)
+
+add_executable(traymirror_integration test_overlay.cpp)
+set_target_properties(traymirror_integration PROPERTIES CXX_STANDARD 20)
+target_link_libraries(traymirror_integration PRIVATE traymirror_host
+                                                    GTest::gtest_main)
+add_test(NAME traymirror_integration COMMAND traymirror_integration)
