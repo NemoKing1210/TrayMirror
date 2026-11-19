@@ -22,3 +22,9 @@ size_t PackRingRecord(uint8_t* dst, size_t dstCap, uint32_t type, uint64_t qpc,
 // (still inside src). Reads strictly within [src, src + srcCap).
 bool ValidateRingRecord(const uint8_t* src, size_t srcCap,
                         RingRecordHeader* outHdr, const uint8_t** outPayload);
+
+// Scans src[from..] for the first fully valid record (ValidateRingRecord
+// as the discriminator, so a false positive needs a matching CRC). Returns
+// the record's offset, or SIZE_MAX when none is found.
+size_t FindNextRecord(const uint8_t* src, size_t srcCap, size_t from,
+                      RingRecordHeader* outHdr);

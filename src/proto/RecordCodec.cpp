@@ -69,3 +69,21 @@ bool ValidateRingRecord(const uint8_t* src, size_t srcCap,
   }
   return true;
 }
+
+size_t FindNextRecord(const uint8_t* src, size_t srcCap, size_t from,
+                      RingRecordHeader* outHdr) {
+  if (src == nullptr || from > srcCap) {
+    return static_cast<size_t>(-1);
+  }
+  for (size_t off = from; off + kRecordHeaderSize <= srcCap; ++off) {
+    const uint8_t* payload = nullptr;
+    RingRecordHeader hdr = {};
+    if (ValidateRingRecord(src + off, srcCap - off, &hdr, &payload)) {
+      if (outHdr != nullptr) {
+        *outHdr = hdr;
+      }
+      return off;
+    }
+  }
+  return static_cast<size_t>(-1);
+}
