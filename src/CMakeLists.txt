@@ -4,7 +4,10 @@
 # fails the build. The hook DLL is exempt (see src/hook/CMakeLists.txt).
 find_program(TRAYMIRROR_CLANG_TIDY clang-tidy)
 if(TRAYMIRROR_CLANG_TIDY)
-  set(CMAKE_CXX_CLANG_TIDY "${TRAYMIRROR_CLANG_TIDY}")
+  # CMake's clang-tidy launch does not forward the compiler's /std flag;
+  # without it clang-tidy parses as C++14 and rejects C++20 constructs.
+  # In clang-cl mode the pass-through spelling is /clang:-std=c++20.
+  set(CMAKE_CXX_CLANG_TIDY "${TRAYMIRROR_CLANG_TIDY};--extra-arg=/clang:-std=c++20")
 endif()
 
 # Spec 2.5 repository layout: proto (protocol library), hook (in-Explorer

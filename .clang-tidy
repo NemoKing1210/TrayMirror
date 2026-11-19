@@ -3,15 +3,21 @@
 # CXX_CLANG_TIDY): it is kernel32-only, allocation-free, exception-free
 # code under deliberate C-style discipline (spec 12.4) that static
 # analysis would fight rather than help; its gate is review + selftest.
+# modernize-avoid-c-arrays is off for the same reason: proto wire structs
+# and compile-time tables are plain C arrays by design so the same code
+# can link into the STL-free hook DLL. readability-use-std-min-max is off
+# because std::min would pull <algorithm> into hook-linked TUs.
 Checks: >
   bugprone-*,
   modernize-*,
   performance-*,
   readability-*,
   -bugprone-easily-swappable-parameters,
+  -modernize-avoid-c-arrays,
   -modernize-use-trailing-return-type,
   -readability-function-cognitive-complexity,
   -readability-identifier-length,
-  -readability-magic-numbers
+  -readability-magic-numbers,
+  -readability-use-std-min-max
 WarningsAsErrors: '*'
 FormatStyle: file
