@@ -451,9 +451,9 @@ int HostAppRun(const HostAppConfig& config) {
       traymirror::DefaultDispatchSender();
   const traymirror::DispatchSender dispatchSender =
       [&log, dispatchBase](const traymirror::DispatchCall& call) {
-        log->debug("dispatch: event={} uid={} owner={:#x}",
-                   static_cast<int>(call.event), call.target.uid,
-                   reinterpret_cast<unsigned long long>(call.target.owner));
+        log->info("dispatch: event={} uid={} owner={:#x}",
+                  static_cast<int>(call.event), call.target.uid,
+                  reinterpret_cast<unsigned long long>(call.target.owner));
         dispatchBase(call);
       };
   if (!overlay.Start(&inbox, &model,
