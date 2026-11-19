@@ -24,6 +24,13 @@ constexpr UINT kCallback = WM_APP + 100;
 constexpr UINT kHangMessage = WM_APP + 101;
 constexpr wchar_t kReceiverClass[] = L"TrayMirrorDispatchTestReceiver";
 
+// One callback as the owner saw it.
+struct RecordedCall {
+  UINT event = 0;  // low word of lParam
+  WPARAM wparam = 0;
+  LPARAM lparam = 0;
+};
+
 // A tray icon owner: its own thread and window, recording every callback.
 class Receiver {
  public:
@@ -56,9 +63,9 @@ class Receiver {
     return received_;
   }
 
-  std::vector<UINT> DrainEvents() {
+  std::vector<RecordedCall> DrainEvents() {
     const std::scoped_lock lock(mutex_);
-    std::vector<UINT> out;
+    std::vector<RecordedCall> out;
     out.swap(events_);
     return out;
   }
@@ -122,7 +129,10 @@ class Receiver {
     }
     if (message == kCallback) {
       const std::scoped_lock lock(self->mutex_);
-      self->events_.push_back(static_cast<UINT>(lparam) & 0xFFFFU);
+      self->events_.push_back(RecordedCall{
+          .event = static_cast<UINT>(lparam) & 0xFFFFU,
+          .wparam = wparam,
+          .lparam = lparam});
       ++self->received_;
     }
     return DefWindowProcW(hwnd, message, wparam, lparam);
@@ -133,7 +143,7 @@ class Receiver {
   std::atomic<HWND> hwnd_{nullptr};
   std::atomic<bool> hung_{false};
   mutable std::mutex mutex_;
-  std::vector<UINT> events_;
+  std::vector<RecordedCall> events_;
   size_t received_ = 0;
 };
 
@@ -177,9 +187,9 @@ TEST(DispatchTest, V0RightClickAllowsForeground) {
   }
   EXPECT_EQ(allowedCount.load(), 1);
   EXPECT_EQ(allowedPid.load(), 4242U);
-  const std::vector<UINT> events = receiver.DrainEvents();
+  const std::vector<RecordedCall> events = receiver.DrainEvents();
   ASSERT_EQ(events.size(), 1U);
-  EXPECT_EQ(events[0], WM_RBUTTONUP);
+  EXPECT_EQ(events[0].event, WM_RBUTTONUP);
 }
 
 TEST(DispatchTest, PostDoesNotBlockOnHungOwner) {
@@ -211,10 +221,10 @@ TEST(DispatchTest, MouseMoveDebounced) {
   dispatcher.Post(MakeCall(receiver.hwnd(), TrayEvent::kMouseMove));
   ASSERT_TRUE(WaitForTotal(&receiver, 2));
 
-  const std::vector<UINT> events = receiver.DrainEvents();
+  const std::vector<RecordedCall> events = receiver.DrainEvents();
   ASSERT_EQ(events.size(), 2U);
-  EXPECT_EQ(events[0], WM_MOUSEMOVE);
-  EXPECT_EQ(events[1], WM_MOUSEMOVE);
+  EXPECT_EQ(events[0].event, WM_MOUSEMOVE);
+  EXPECT_EQ(events[1].event, WM_MOUSEMOVE);
 }
 
 TEST(DispatchTest, DestructorDrainsQueue) {
@@ -230,4 +240,45 @@ TEST(DispatchTest, DestructorDrainsQueue) {
   // After the dispatcher is gone, every queued call must have been sent.
   EXPECT_TRUE(WaitForTotal(&receiver, 3));
   EXPECT_EQ(receiver.DrainEvents().size(), 3U);
+}
+
+// Report 07, measured on build 26300: a v0 left click is exactly
+// WM_LBUTTONDOWN then WM_LBUTTONUP, with the uid in wParam and the event
+// in lParam — no NIN_* and no coordinates anywhere.
+TEST(DispatchTest, V0LeftClickMatchesMeasuredSequence) {
+  Receiver receiver;
+  ASSERT_TRUE(receiver.Start());
+
+  Dispatcher dispatcher;
+  dispatcher.Post(MakeCall(receiver.hwnd(), TrayEvent::kLeftDown));
+  dispatcher.Post(MakeCall(receiver.hwnd(), TrayEvent::kLeftUp));
+  ASSERT_TRUE(WaitForTotal(&receiver, 2));
+
+  const std::vector<RecordedCall> calls = receiver.DrainEvents();
+  ASSERT_EQ(calls.size(), 2U);
+  EXPECT_EQ(calls[0].event, WM_LBUTTONDOWN);
+  EXPECT_EQ(calls[0].lparam, 0x201);
+  EXPECT_EQ(calls[0].wparam, 7U);  // the uid, never a point
+  EXPECT_EQ(calls[1].event, WM_LBUTTONUP);
+  EXPECT_EQ(calls[1].lparam, 0x202);
+  EXPECT_EQ(calls[1].wparam, 7U);
+}
+
+// Report 07: a v0 double click is WM_LBUTTONDBLCLK then WM_LBUTTONUP —
+// Windows does not repeat WM_LBUTTONDOWN before the double click.
+TEST(DispatchTest, V0DoubleClickMatchesMeasuredSequence) {
+  Receiver receiver;
+  ASSERT_TRUE(receiver.Start());
+
+  Dispatcher dispatcher;
+  dispatcher.Post(MakeCall(receiver.hwnd(), TrayEvent::kLeftDblClk));
+  dispatcher.Post(MakeCall(receiver.hwnd(), TrayEvent::kLeftUp));
+  ASSERT_TRUE(WaitForTotal(&receiver, 2));
+
+  const std::vector<RecordedCall> calls = receiver.DrainEvents();
+  ASSERT_EQ(calls.size(), 2U);
+  EXPECT_EQ(calls[0].event, WM_LBUTTONDBLCLK);
+  EXPECT_EQ(calls[0].lparam, 0x203);
+  EXPECT_EQ(calls[1].event, WM_LBUTTONUP);
+  EXPECT_EQ(calls[1].lparam, 0x202);
 }
