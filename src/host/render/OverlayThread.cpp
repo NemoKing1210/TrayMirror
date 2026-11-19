@@ -5,6 +5,7 @@
 
 #include <shellscalingapi.h>
 
+#include <algorithm>
 #include <bit>
 #include <utility>
 
@@ -170,9 +171,16 @@ void OverlayThread::Stop() {
 
 void OverlayThread::BuildOverlays() {
   overlays_.clear();
+  stripRoomExhausted_ = false;
   if (!enumerate_) {
     return;
   }
+  // The strip must be wide enough for every visible icon: the tail is
+  // clipped, and a newly added icon would otherwise be invisible and
+  // unclickable (12 slots is only the minimum).
+  const size_t slots = std::max<size_t>(
+      static_cast<size_t>(kStripIconSlots), CountVisibleIcons());
+  builtSlots_ = slots;
   const HWND ui = uiHwnd_.load();
   for (const MonitorTaskbar& mt : enumerate_()) {
     if (!mt.hasTaskbar) {
@@ -180,9 +188,13 @@ void OverlayThread::BuildOverlays() {
     }
     const UINT dpi = DpiForMonitor(mt.monitor);
     const int slot = IconPxForDpi(dpi) + IconGapPxForDpi(dpi);
-    const RECT strip = ComputeOverlayStripRect(mt, slot * kStripIconSlots);
+    const int desired = slot * static_cast<int>(slots);
+    const RECT strip = ComputeOverlayStripRect(mt, desired);
     if (strip.right <= strip.left) {
       continue;
+    }
+    if ((strip.right - strip.left) < desired) {
+      stripRoomExhausted_ = true;  // the taskbar cannot fit them all
     }
     auto overlay = Overlay::Create(
         mt.monitor, strip,
@@ -220,6 +232,19 @@ void OverlayThread::PostGesture(const DispatchCall& call) {
   }
 }
 
+size_t OverlayThread::CountVisibleIcons() const {
+  if (model_ == nullptr) {
+    return 0;
+  }
+  size_t count = 0;
+  for (const TrayIcon& icon : model_->icons()) {
+    if (!icon.hidden()) {
+      ++count;
+    }
+  }
+  return count;
+}
+
 void OverlayThread::PushModelToOverlays() {
   if (model_ == nullptr || overlays_.empty()) {
     return;
@@ -243,6 +268,13 @@ void OverlayThread::PushModelToOverlays() {
   for (const std::unique_ptr<Overlay>& overlay : overlays_) {
     overlay->SetIcons(icons);
     overlay->Render();
+  }
+  // The model outgrew the strip: rebuild it wider so no icon is hidden.
+  // Not reposted when the taskbar has no more room, so a saturated strip
+  // cannot cause a rebuild loop.
+  const HWND ui = uiHwnd_.load();
+  if (!stripRoomExhausted_ && icons.size() > builtSlots_ && ui != nullptr) {
+    PostMessageW(ui, kMsgRebuild, 0, 0);
   }
 }
 

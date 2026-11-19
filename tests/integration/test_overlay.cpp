@@ -10,6 +10,8 @@
 #include "dispatch/Dispatch.h"
 #include "win/Monitors.h"
 
+#include "TrayPayload.h"
+
 #include <windows.h>
 
 #include <commctrl.h>
@@ -180,6 +182,47 @@ IconView FirstIcon(DispatchTarget target) {
                   .serial = 1,
                   .tip = L"first",
                   .target = target};
+}
+
+// The widest live TrayMirrorOverlay window, 0 when none exists.
+BOOL CALLBACK OverlayWidthProc(HWND hwnd, LPARAM data) {
+  wchar_t cls[64] = {};
+  if (GetClassNameW(hwnd, cls, static_cast<int>(std::size(cls))) == 0 ||
+      wcscmp(cls, L"TrayMirrorOverlay") != 0) {
+    return TRUE;
+  }
+  RECT rect = {};
+  if (GetWindowRect(hwnd, &rect) == FALSE) {
+    return TRUE;
+  }
+  auto* widest = reinterpret_cast<int*>(data);
+  const int width = rect.right - rect.left;
+  if (width > *widest) {
+    *widest = width;
+  }
+  return TRUE;
+}
+
+int OverlayWidth() {
+  int width = 0;
+  EnumWindows(OverlayWidthProc, reinterpret_cast<LPARAM>(&width));
+  return width;
+}
+
+TrayMessage MakeAdd(uint32_t uid) {
+  constexpr uint32_t kNifMessage = 0x1;
+  constexpr uint32_t kNifIcon = 0x2;
+  constexpr uint32_t kNifTip = 0x4;
+  TrayMessage msg = {};
+  msg.nim = 0;
+  msg.hwnd = 0x1234;
+  msg.uid = uid;
+  msg.flags = kNifMessage | kNifIcon | kNifTip;
+  msg.callbackMsg = 0x13A0;
+  msg.icon = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(
+      LoadIconW(nullptr, MAKEINTRESOURCEW(32512))));
+  wcscpy_s(msg.tip, 130, L"pushed");
+  return msg;
 }
 
 }  // namespace
@@ -378,5 +421,33 @@ TEST(OverlayClick, UiStaysResponsiveWhileOwnerHung) {
   EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed)
                 .count(),
             200);
+}
+
+// Stage 2 review finding: a strip sized for 12 slots clipped every icon
+// beyond the twelfth, so a newly added icon could be invisible and
+// unclickable. The strip must grow when the model outgrows it.
+TEST(OverlayStrip, GrowsToShowEveryVisibleIcon) {
+  auto enumerate = []() {
+    return std::vector<MonitorTaskbar>{SyntheticTaskbar()};
+  };
+  ModelInbox inbox;
+  TrayModel model;
+  OverlayThread thread;
+  ASSERT_TRUE(thread.Start(&inbox, &model, enumerate));
+
+  const int before = OverlayWidth();
+  ASSERT_GT(before, 0);
+
+  for (uint32_t uid = 1; uid <= 20; ++uid) {
+    inbox.Push(MakeAdd(uid));
+  }
+
+  int after = before;
+  for (int waited = 0; waited < 3000 && after <= before; waited += 50) {
+    Sleep(50);
+    after = OverlayWidth();
+  }
+  EXPECT_GT(after, before);
+  thread.Stop();
 }
 

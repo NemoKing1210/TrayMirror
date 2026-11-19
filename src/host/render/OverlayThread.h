@@ -43,6 +43,7 @@ class OverlayThread {
   void BuildOverlays();
   void ApplyInbox();
   void PushModelToOverlays();
+  [[nodiscard]] size_t CountVisibleIcons() const;
   void PostGesture(const DispatchCall& call);
 
   static bool EnsureUiClass();
@@ -62,6 +63,10 @@ class OverlayThread {
   // Created on the UI thread once the sender is known; destroyed with it.
   std::unique_ptr<Dispatcher> dispatcher_;
   std::vector<std::unique_ptr<Overlay>> overlays_;
+  // How many icon slots the current strips were built for, and whether
+  // the taskbar had no room for that many (then growth cannot help).
+  size_t builtSlots_ = 0;
+  bool stripRoomExhausted_ = false;
 };
 
 }  // namespace traymirror
