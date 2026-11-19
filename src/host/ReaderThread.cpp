@@ -32,7 +32,7 @@ void ReaderLoop(volatile RingHeader* header, volatile uint8_t* ring,
         TrayMessage msg = {};
         const TrayDecodeStatus ds = DecodeTrayPayload(payload, hdr.payloadSize, &msg);
         if (ds == TrayDecodeStatus::Ok) {
-          sink(hdr, msg.nim);
+          sink(hdr, msg);
         } else if (ds == TrayDecodeStatus::NotTray) {
           log->debug("non-tray record type={} dropped silently", hdr.type);
         } else {

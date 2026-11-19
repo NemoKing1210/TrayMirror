@@ -302,6 +302,20 @@ BOOL WINAPI ConsoleCtrl(DWORD type) {
   return TRUE;
 }
 
+// The record log line, per plan task 8: the stage-0 measured fields,
+// decoded — the stage 1 acceptance deliverable and the stage 2
+// handoff read this format.
+const char* NimName(uint32_t nim) {
+  switch (nim) {
+    case 0: return "ADD";
+    case 1: return "MODIFY";
+    case 2: return "DELETE";
+    case 3: return "SETFOCUS";
+    case 4: return "SETVERSION";
+    default: return "UNKNOWN";
+  }
+}
+
 }  // namespace
 
 int HostAppRun(const HostAppConfig& config) {
@@ -379,9 +393,12 @@ int HostAppRun(const HostAppConfig& config) {
   std::thread reader([header = ring.header, ringBytes = ring.ring, signal,
                       readerStop, &log]() {
     ReaderLoop(header, ringBytes, signal, readerStop,
-               [&log](const RingRecordHeader& hdr, uint32_t nim) {
-                 log->info("NIM_{} record type={} qpc={}", nim, hdr.type,
-                           hdr.qpcTimestamp);
+               [&log](const RingRecordHeader&, const TrayMessage& msg) {
+                 log->info(
+                     "NIM_{} hwnd={:#x} uid={:#x} flags={:#x} "
+                     "callback={:#x} icon={:#x} tip=\"{}\"",
+                     NimName(msg.nim), msg.hwnd, msg.uid, msg.flags,
+                     msg.callbackMsg, msg.icon, Narrow(msg.tip));
                });
   });
 

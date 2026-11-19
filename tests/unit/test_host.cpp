@@ -7,6 +7,7 @@
 #include "ReaderThread.h"
 #include "Ring.h"
 #include "RingWriter.h"
+#include "TrayPayload.h"
 #include "ipc/SingleInstance.h"
 
 #include <windows.h>
@@ -92,6 +93,12 @@ TEST(HostApp, DisableHookArmsKillSwitch) {
 struct SinkRecord {
   uint32_t type = 0;
   uint32_t nim = 0;
+  uint32_t hwnd = 0;
+  uint32_t uid = 0;
+  uint32_t flags = 0;
+  uint32_t callbackMsg = 0;
+  uint32_t icon = 0;
+  wchar_t tip[130] = {};
 };
 
 TEST(ReaderLoop, DrainsRecordsAndSignalsSink) {
@@ -103,7 +110,9 @@ TEST(ReaderLoop, DrainsRecordsAndSignalsSink) {
   std::vector<uint8_t> ring(8192);
 
   // Three tray records via the wire convention: dwData=1, cbData=1484,
-  // measured TRAYDATA inside.
+  // measured TRAYDATA inside, each with its own owner window, uid,
+  // flags, callback, icon and tip — the sink must receive ALL of them
+  // (the plan's stage 1 log format, not just the NIM code).
   const uint32_t kTrayMagic = 0x34753423;
   for (uint32_t i = 0; i < 3; ++i) {
     std::vector<uint8_t> payload(8 + 1484, 0);
@@ -112,8 +121,21 @@ TEST(ReaderLoop, DrainsRecordsAndSignalsSink) {
     memcpy(payload.data(), &dw, 4);
     memcpy(payload.data() + 4, &cb, 4);
     memcpy(payload.data() + 8, &kTrayMagic, 4);
-    uint32_t nim = i;
+    const uint32_t nim = i;
+    const uint32_t hwnd = 0xA000 + i;
+    const uint32_t uid = 10 + i;
+    const uint32_t flags = 0xA4;
+    const uint32_t callbackMsg = 0x13A0;
+    const uint32_t icon = 0x1002B + i;
     memcpy(payload.data() + 12, &nim, 4);
+    memcpy(payload.data() + 8 + kTrayOffHwnd, &hwnd, 4);
+    memcpy(payload.data() + 8 + kTrayOffUid, &uid, 4);
+    memcpy(payload.data() + 8 + kTrayOffFlags, &flags, 4);
+    memcpy(payload.data() + 8 + kTrayOffCallbackMsg, &callbackMsg, 4);
+    memcpy(payload.data() + 8 + kTrayOffIcon, &icon, 4);
+    wchar_t tip[5] = L"rec0";
+    tip[3] = static_cast<wchar_t>(L'0' + static_cast<wchar_t>(i));
+    memcpy(payload.data() + 8 + kTrayOffTip, tip, sizeof(tip));
     ASSERT_TRUE(RingWriterPut(&h, ring.data(), kRecNotifyCopydata, i, 0,
                               payload.data(), 1484 + 8));
   }
@@ -130,8 +152,18 @@ TEST(ReaderLoop, DrainsRecordsAndSignalsSink) {
   std::thread reader([&] {
     ReaderLoop(
         &h, ring.data(), signal, stop,
-        [&sink, &got, &sinkReady](const RingRecordHeader& hdr, uint32_t nim) {
-          sink.push_back({hdr.type, nim});
+        [&sink, &got, &sinkReady](const RingRecordHeader& hdr,
+                                  const TrayMessage& msg) {
+          SinkRecord rec = {};
+          rec.type = hdr.type;
+          rec.nim = msg.nim;
+          rec.hwnd = msg.hwnd;
+          rec.uid = msg.uid;
+          rec.flags = msg.flags;
+          rec.callbackMsg = msg.callbackMsg;
+          rec.icon = msg.icon;
+          memcpy(rec.tip, msg.tip, sizeof(rec.tip));
+          sink.push_back(rec);
           ++got;
           SetEvent(sinkReady);
         });
@@ -153,7 +185,14 @@ TEST(ReaderLoop, DrainsRecordsAndSignalsSink) {
 
   ASSERT_EQ(sink.size(), 3u);
   EXPECT_EQ(sink[0].type, kRecNotifyCopydata);
+  EXPECT_EQ(sink[0].nim, 0u);
+  EXPECT_EQ(sink[0].hwnd, 0xA000u);
+  EXPECT_EQ(sink[1].uid, 11u);
+  EXPECT_EQ(sink[1].flags, 0xA4u);
+  EXPECT_EQ(sink[1].callbackMsg, 0x13A0u);
+  EXPECT_EQ(sink[2].icon, 0x1002Du);
   EXPECT_EQ(sink[2].nim, 2u);
+  EXPECT_STREQ(sink[2].tip, L"rec2");
 
   CloseHandle(signal);
   CloseHandle(stop);

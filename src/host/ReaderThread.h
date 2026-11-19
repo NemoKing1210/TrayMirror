@@ -5,15 +5,17 @@
 #pragma once
 
 #include "Ring.h"
+#include "TrayPayload.h"
 
 #include <windows.h>
 
 #include <cstdint>
 #include <functional>
 
-// Sink receives (record header, decoded NIM code). Runs on the reader
-// thread.
-using RecordSink = std::function<void(const RingRecordHeader&, uint32_t)>;
+// Sink receives (record header, fully decoded tray message). Runs on
+// the reader thread.
+using RecordSink =
+    std::function<void(const RingRecordHeader&, const TrayMessage&)>;
 
 // Returns when the stop event is signaled and the ring is drained.
 void ReaderLoop(volatile RingHeader* header, volatile uint8_t* ring,
