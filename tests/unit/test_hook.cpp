@@ -234,4 +234,22 @@ TEST_F(HookFixture, NoMappingMeansSilentNoOp) {
   ASSERT_TRUE(SharedRingCreate(&ring_, 999, err, 256)) << err;
 }
 
+TEST(HookKillSwitch, EventIsHeldForTheDllLifetime) {
+  // A --disable-hook arm must stay observable from the moment the hook
+  // DLL exists anywhere — even before the first tray message reaches
+  // it (the lazy per-message open would leave exactly that window: an
+  // orphaned hook with no messages yet, and an arm that evaporates
+  // with the arming process). While the DLL is loaded, the named Off
+  // event must exist with NO other handle holding it.
+  HookApi api = LoadHook();
+  ASSERT_NE(api.dll, nullptr) << "LoadLibrary failed: " << GetLastError();
+
+  HANDLE off = OpenEventW(EVENT_MODIFY_STATE, FALSE, kOffEventName);
+  EXPECT_NE(off, nullptr) << "the loaded hook must hold the Off event";
+  if (off != nullptr) {
+    CloseHandle(off);
+  }
+  FreeLibrary(api.dll);
+}
+
 }  // namespace

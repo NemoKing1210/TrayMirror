@@ -120,14 +120,21 @@ void HandleCopydata(const COPYDATASTRUCT* cds, HookState* st) {
 
 }  // namespace
 
-// DLL entry: release the IPC handles when the DLL unloads. Inside
-// explorer.exe this fires only after the host has unhooked and the
-// loader dropped the last reference — the session objects then die
-// with their last owner instead of per-load. In the unit/selftest
-// process this is what keeps test fixtures isolated. CloseHandle and
-// UnmapViewOfFile are non-blocking kernel32 calls: allowed under the
-// loader lock (spec 12.4).
+// DLL entry. On PROCESS_ATTACH the kill switch event is created/open
+// and held for the DLL's lifetime: a `--disable-hook` arm must stay
+// observable from the moment the hook exists anywhere, including the
+// window before the first tray message (the lazy per-message open
+// would let the named event object die with the arming process before
+// an orphaned hook ever sees it). On PROCESS_DETACH the IPC handles
+// are released: inside explorer.exe that fires only after the host has
+// unhooked and the loader dropped the last reference, and in the
+// unit/selftest process it keeps fixtures isolated. CreateEventW and
+// the release calls are non-blocking kernel32 calls: allowed under
+// the loader lock (spec 12.4).
 BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
+  if (reason == DLL_PROCESS_ATTACH) {
+    g_state.off = CreateEventW(nullptr, TRUE, FALSE, kOffEventName);
+  }
   if (reason == DLL_PROCESS_DETACH) {
     if (g_state.header != nullptr) {
       UnmapViewOfFile(
