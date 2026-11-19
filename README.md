@@ -70,6 +70,11 @@ spikes/
 CMake, Ninja and ctest are **not** on `PATH`; [`scripts/build.ps1`](scripts/build.ps1)
 wires them up for the build.
 
+Dependencies (spdlog, GoogleTest) are managed by [vcpkg](https://vcpkg.io)
+manifest mode: on first use `scripts\build.ps1` clones and bootstraps vcpkg
+into a git-ignored `.vcpkg\` directory, then passes its CMake toolchain —
+no manual installation is needed.
+
 ## Build
 
 ```powershell

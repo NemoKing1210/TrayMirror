@@ -42,8 +42,12 @@ $VcArch = if ($Arch -eq 'x64') { 'x64' } else { 'x86' }
 
 $BuildPath = Join-Path $Repo $BuildDir
 
-# CMake and Ninja are not in PATH: prepend them for the duration of the call.
+# CMake and Ninja are not in PATH: prepend them for the duration of the
+# call. The VS "C++ Clang tools" component (clang-tidy/clang-format) is
+# picked up automatically when present.
 $env:Path = "$CmakeBin;$NinjaBin;$env:Path"
+$LlvmBin = Join-Path $BuildTools 'VC\Tools\Llvm\x64\bin'
+if (Test-Path $LlvmBin) { $env:Path = "$LlvmBin;$env:Path" }
 
 cmd /s /c "`"$Vcvars`" $VcArch && cmake -S `"$Repo`" -B `"$BuildPath`" -G Ninja -DCMAKE_BUILD_TYPE=$Config -DCMAKE_TOOLCHAIN_FILE=`"$VcpkgToolchain`" && cmake --build `"$BuildPath`""
 exit $LASTEXITCODE

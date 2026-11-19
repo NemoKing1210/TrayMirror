@@ -1,0 +1,17 @@
+# clang-tidy checks for TrayMirror. Enabled checks are errors (spec 12.8:
+# clang-tidy clean). The hook DLL is exempt (its target clears
+# CXX_CLANG_TIDY): it is kernel32-only, allocation-free, exception-free
+# code under deliberate C-style discipline (spec 12.4) that static
+# analysis would fight rather than help; its gate is review + selftest.
+Checks: >
+  bugprone-*,
+  modernize-*,
+  performance-*,
+  readability-*,
+  -bugprone-easily-swappable-parameters,
+  -modernize-use-trailing-return-type,
+  -readability-function-cognitive-complexity,
+  -readability-identifier-length,
+  -readability-magic-numbers
+WarningsAsErrors: '*'
+FormatStyle: file

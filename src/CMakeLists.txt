@@ -1,3 +1,12 @@
+# Spec 12.8: clang-tidy clean. Opt-in: when the tool is on PATH (VS
+# "C++ Clang tools" component; build.ps1 wires the path), every
+# translation unit under src/ is checked at compile time and a finding
+# fails the build. The hook DLL is exempt (see src/hook/CMakeLists.txt).
+find_program(TRAYMIRROR_CLANG_TIDY clang-tidy)
+if(TRAYMIRROR_CLANG_TIDY)
+  set(CMAKE_CXX_CLANG_TIDY "${TRAYMIRROR_CLANG_TIDY}")
+endif()
+
 # Spec 2.5 repository layout: proto (protocol library), hook (in-Explorer
 # DLL), host (main process), tools (diagnostics). The hook and the host are
 # x64-only: a 32-bit hook cannot be installed into a 64-bit Explorer.
