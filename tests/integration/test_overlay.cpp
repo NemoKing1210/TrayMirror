@@ -209,7 +209,7 @@ int OverlayWidth() {
   return width;
 }
 
-TrayMessage MakeAdd(uint32_t uid) {
+TrayMessage MakeAdd(uint32_t uid, const wchar_t* tip) {
   constexpr uint32_t kNifMessage = 0x1;
   constexpr uint32_t kNifIcon = 0x2;
   constexpr uint32_t kNifTip = 0x4;
@@ -221,8 +221,24 @@ TrayMessage MakeAdd(uint32_t uid) {
   msg.callbackMsg = 0x13A0;
   msg.icon = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(
       LoadIconW(nullptr, MAKEINTRESOURCEW(32512))));
-  wcscpy_s(msg.tip, 130, L"pushed");
+  wcscpy_s(msg.tip, 130, tip);
   return msg;
+}
+
+HWND FirstOverlayWindow() {
+  HWND found = nullptr;
+  EnumWindows(
+      [](HWND hwnd, LPARAM data) -> BOOL {
+        wchar_t cls[64] = {};
+        if (GetClassNameW(hwnd, cls, static_cast<int>(std::size(cls))) != 0 &&
+            wcscmp(cls, L"TrayMirrorOverlay") == 0) {
+          *reinterpret_cast<HWND*>(data) = hwnd;
+          return FALSE;
+        }
+        return TRUE;
+      },
+      reinterpret_cast<LPARAM>(&found));
+  return found;
 }
 
 }  // namespace
@@ -439,7 +455,7 @@ TEST(OverlayStrip, GrowsToShowEveryVisibleIcon) {
   ASSERT_GT(before, 0);
 
   for (uint32_t uid = 1; uid <= 20; ++uid) {
-    inbox.Push(MakeAdd(uid));
+    inbox.Push(MakeAdd(uid, L"pushed"));
   }
 
   int after = before;
@@ -448,6 +464,51 @@ TEST(OverlayStrip, GrowsToShowEveryVisibleIcon) {
     after = OverlayWidth();
   }
   EXPECT_GT(after, before);
+  thread.Stop();
+}
+
+// A busy tray has more icons than the strip can show, and the icons that
+// matter are the ones that just registered: the newest icon must sit at
+// the strip's left edge, where clipping can never hide it.
+TEST(OverlayStrip, NewestIconIsLeftmost) {
+  auto enumerate = []() {
+    return std::vector<MonitorTaskbar>{SyntheticTaskbar()};
+  };
+  ModelInbox inbox;
+  TrayModel model;
+  OverlayThread thread;
+  ASSERT_TRUE(thread.Start(&inbox, &model, enumerate));
+
+  inbox.Push(MakeAdd(1, L"first"));
+  inbox.Push(MakeAdd(2, L"second"));
+  inbox.Push(MakeAdd(3, L"third"));
+
+  const HWND overlay = FirstOverlayWindow();
+  ASSERT_NE(overlay, nullptr);
+  RECT rect = {};
+  ASSERT_NE(GetWindowRect(overlay, &rect), FALSE);
+  const int height = rect.bottom - rect.top;
+
+  // The tip can be read only once the icon is applied; waiting for the
+  // newest tip also proves the earlier adds were applied before it.
+  wchar_t text[128] = {};
+  for (int waited = 0; waited < 3000 && wcscmp(text, L"third") != 0;
+       waited += 50) {
+    Sleep(50);
+    SendMessageW(overlay, WM_MOUSEMOVE, 0, MAKELPARAM(4, height / 2));
+    const HWND tip = FindOwnedTooltip(overlay);
+    if (tip == nullptr) {
+      continue;
+    }
+    TOOLINFOW info = {};
+    info.cbSize = sizeof(info);
+    info.hwnd = overlay;
+    info.uId = reinterpret_cast<UINT_PTR>(overlay);
+    info.lpszText = text;
+    SendMessageW(tip, TTM_GETTEXTW, 128, reinterpret_cast<LPARAM>(&info));
+  }
+  EXPECT_STREQ(text, L"third");
+
   thread.Stop();
 }
 

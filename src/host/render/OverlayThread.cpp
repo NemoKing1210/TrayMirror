@@ -251,7 +251,12 @@ void OverlayThread::PushModelToOverlays() {
   }
   std::vector<IconView> icons;
   icons.reserve(model_->icons().size());
-  for (const TrayIcon& icon : model_->icons()) {
+  // Newest first: the strip clips its tail when the tray is bigger than
+  // the taskbar can show, and the icon that just registered is the one
+  // the user is looking for. Oldest icons are the ones that clip.
+  const auto& all = model_->icons();
+  for (auto it = all.rbegin(); it != all.rend(); ++it) {
+    const TrayIcon& icon = *it;
     if (icon.hidden()) {
       continue;
     }
