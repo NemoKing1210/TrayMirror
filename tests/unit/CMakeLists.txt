@@ -3,7 +3,7 @@ find_package(GTest CONFIG REQUIRED)
 add_executable(traymirror_unit test_proto.cpp test_ring.cpp test_sharedring.cpp
                test_traypayload.cpp test_hook.cpp test_host.cpp test_dump.cpp
                test_model.cpp test_initialsync.cpp test_monitors.cpp
-               test_inbox.cpp test_iconcache.cpp)
+               test_inbox.cpp test_iconcache.cpp test_hover.cpp)
 # gtest's imported targets carry CXX_STANDARD 17; raising the consumer's
 # standard avoids the "/std:c++17 redefined to /std:c++20" command-line
 # warning (the repo norm is zero warnings).

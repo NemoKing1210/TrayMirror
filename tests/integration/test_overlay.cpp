@@ -11,8 +11,12 @@
 
 #include <windows.h>
 
+#include <commctrl.h>
+
 #include <gtest/gtest.h>
 
+#include <cwchar>
+#include <iterator>
 #include <memory>
 #include <vector>
 
@@ -24,6 +28,32 @@ using traymirror::MonitorTaskbar;
 using traymirror::Overlay;
 using traymirror::OverlayThread;
 using traymirror::TrayModel;
+
+// The system tooltip window is a top-level window of class
+// tooltips_class32 owned by the overlay. Found by enumeration so the
+// test never depends on the tooltip's own internals.
+HWND g_tooltipOwner = nullptr;
+HWND g_tooltipFound = nullptr;
+
+BOOL CALLBACK FindTooltipProc(HWND hwnd, LPARAM /*unused*/) {
+  wchar_t cls[64] = {};
+  if (GetClassNameW(hwnd, cls, static_cast<int>(std::size(cls))) == 0 ||
+      wcscmp(cls, L"tooltips_class32") != 0) {
+    return TRUE;
+  }
+  if (GetWindow(hwnd, GW_OWNER) != g_tooltipOwner) {
+    return TRUE;
+  }
+  g_tooltipFound = hwnd;
+  return FALSE;
+}
+
+HWND FindOwnedTooltip(HWND owner) {
+  g_tooltipOwner = owner;
+  g_tooltipFound = nullptr;
+  EnumWindows(FindTooltipProc, 0);
+  return g_tooltipFound;
+}
 
 // A taskbar row on the monitor the test process starts on: the real
 // work-area edge, a measured-width clock at its right edge.
@@ -91,6 +121,40 @@ TEST(OverlaySmoke, DrawsIconsWithRealD2D) {
        traymirror::IconView{.icon = nullptr, .serial = 3, .tip = L"missing"}});
   overlay->Render();
   overlay->Render();  // clean: no dirty flag, no redraw
+}
+
+TEST(OverlaySmoke, TooltipShowsAndHides) {
+  const MonitorTaskbar mt = SyntheticTaskbar();
+  const RECT strip = ComputeOverlayStripRect(mt, 200);
+  auto overlay = Overlay::Create(mt.monitor, strip);
+  ASSERT_NE(overlay, nullptr);
+  overlay->SetIcons({traymirror::IconView{
+      .icon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512)),
+      .serial = 1,
+      .tip = L"first tip"}});
+  overlay->Render();
+
+  // The first cell starts at the strip's left edge; the icon is
+  // vertically centered, so the cell's middle is the strip's middle.
+  const int height = strip.bottom - strip.top;
+  const POINT inside = {4, height / 2};
+  SendMessageW(overlay->hwnd(), WM_MOUSEMOVE, 0,
+               MAKELPARAM(inside.x, inside.y));
+
+  const HWND tip = FindOwnedTooltip(overlay->hwnd());
+  ASSERT_NE(tip, nullptr);
+  EXPECT_NE(IsWindowVisible(tip), FALSE);
+  wchar_t text[128] = {};
+  TOOLINFOW info = {};
+  info.cbSize = sizeof(info);
+  info.hwnd = overlay->hwnd();
+  info.uId = reinterpret_cast<UINT_PTR>(overlay->hwnd());
+  info.lpszText = text;
+  SendMessageW(tip, TTM_GETTEXTW, 128, reinterpret_cast<LPARAM>(&info));
+  EXPECT_STREQ(text, L"first tip");
+
+  SendMessageW(overlay->hwnd(), WM_MOUSELEAVE, 0, 0);
+  EXPECT_EQ(IsWindowVisible(tip), FALSE);
 }
 
 TEST(OverlaySmoke, UiWindowExistsWhileRunning) {  auto enumerate = []() {

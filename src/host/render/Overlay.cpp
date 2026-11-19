@@ -4,6 +4,7 @@
 #include "win/Monitors.h"
 
 #include <d2d1helper.h>
+#include <windowsx.h>
 
 #include <bit>
 #include <iterator>
@@ -84,6 +85,13 @@ LRESULT Overlay::HandleMessage(HWND hwnd, UINT message, WPARAM wparam,
       return 1;  // the composition surface owns the pixels
     case WM_PAINT:
       ValidateRect(hwnd, nullptr);
+      return 0;
+    case WM_MOUSEMOVE:
+      HandleMouseMove(
+          hwnd, POINT{.x = GET_X_LPARAM(lparam), .y = GET_Y_LPARAM(lparam)});
+      return 0;
+    case WM_MOUSELEAVE:
+      ClearHover();
       return 0;
     case WM_SETTINGCHANGE:
       ApplyTheme();
@@ -286,6 +294,70 @@ void Overlay::Render() {
   }
 }
 
+void Overlay::HandleMouseMove(HWND hwnd, POINT pt) {
+  if (!tracking_) {
+    TRACKMOUSEEVENT track = {};
+    track.cbSize = sizeof(track);
+    track.dwFlags = TME_LEAVE;
+    track.hwndTrack = hwnd;
+    TrackMouseEvent(&track);
+    tracking_ = true;
+  }
+  size_t index = kNoHover;
+  if (!HitTestIcon(cells_, pt, &index)) {
+    ClearHover();
+    return;
+  }
+  if (index == hovered_) {
+    return;
+  }
+  hovered_ = index;
+  dirty_ = true;
+  Render();
+  if (index >= icons_.size()) {
+    return;
+  }
+  if (tooltip_ == nullptr) {
+    tooltip_ = Tooltip::Create(hwnd);
+  }
+  if (tooltip_ != nullptr && icons_[index].tip[0] != L'\0') {
+    const RECT& cell = cells_[index];
+    const POINT anchor = {
+        .x = strip_.left + cell.left + ((cell.right - cell.left) / 2),
+        .y = strip_.top - 4};
+    tooltip_->Show(icons_[index].tip, anchor);
+  } else if (tooltip_ != nullptr) {
+    tooltip_->Hide();
+  }
+}
+
+void Overlay::ClearHover() {
+  tracking_ = false;
+  if (tooltip_ != nullptr) {
+    tooltip_->Hide();
+  }
+  if (hovered_ == kNoHover) {
+    return;
+  }
+  hovered_ = kNoHover;
+  dirty_ = true;
+  Render();
+}
+
+bool HitTestIcon(const std::vector<RECT>& cells, POINT pt, size_t* index) {
+  for (size_t i = 0; i < cells.size(); ++i) {
+    const RECT& cell = cells[i];
+    if (pt.x >= cell.left && pt.x < cell.right && pt.y >= cell.top &&
+        pt.y < cell.bottom) {
+      if (index != nullptr) {
+        *index = i;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
 void Overlay::DrawIcons(ID2D1DeviceContext* dc, int width, int height) {
   cells_.clear();
   UINT dpi = GetDpiForWindow(hwnd_);
@@ -297,7 +369,8 @@ void Overlay::DrawIcons(ID2D1DeviceContext* dc, int width, int height) {
   const int top = (height - iconPx) / 2;
   std::set<IconCacheKey> live;
   int x = 0;
-  for (const IconView& icon : icons_) {
+  for (size_t i = 0; i < icons_.size(); ++i) {
+    const IconView& icon = icons_[i];
     if (x + iconPx > width) {
       break;  // the tail is clipped: stage 2 has no chevron (R6)
     }
@@ -308,6 +381,9 @@ void Overlay::DrawIcons(ID2D1DeviceContext* dc, int width, int height) {
         D2D1::RectF(static_cast<float>(x), static_cast<float>(top),
                     static_cast<float>(x + iconPx),
                     static_cast<float>(top + iconPx));
+    if (i == hovered_) {
+      DrawHighlight(dc, cell);
+    }
     if (bitmap != nullptr) {
       dc->DrawBitmap(bitmap, cell, 1.0F, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
     } else {
@@ -320,6 +396,19 @@ void Overlay::DrawIcons(ID2D1DeviceContext* dc, int width, int height) {
     x += iconPx + gap;
   }
   cache_.Prune(live);
+}
+
+void Overlay::DrawHighlight(ID2D1DeviceContext* dc,
+                            const D2D1_RECT_F& cell) const {
+  Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
+  const D2D1_COLOR_F color =
+      dark_ ? D2D1_COLOR_F{.r = 1.0F, .g = 1.0F, .b = 1.0F, .a = 0.10F}
+            : D2D1_COLOR_F{.r = 0.0F, .g = 0.0F, .b = 0.0F, .a = 0.08F};
+  if (FAILED(dc->CreateSolidColorBrush(color, brush.GetAddressOf())) != 0 ||
+      brush == nullptr) {
+    return;
+  }
+  dc->FillRoundedRectangle(D2D1::RoundedRect(cell, 4.0F, 4.0F), brush.Get());
 }
 
 void Overlay::DrawPlaceholder(ID2D1DeviceContext* dc,

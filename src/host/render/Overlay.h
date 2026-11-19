@@ -5,6 +5,7 @@
 #pragma once
 
 #include "render/IconCache.h"
+#include "render/Tooltip.h"
 
 #include <windows.h>
 
@@ -28,6 +29,10 @@ struct IconView {
   UINT serial = 0;
   std::wstring tip;
 };
+
+// Strip-local hit test over the drawn cells; true and the cell index on
+// a hit (the gap between cells is not a hit).
+bool HitTestIcon(const std::vector<RECT>& cells, POINT pt, size_t* index);
 
 class Overlay {
  public:
@@ -60,12 +65,21 @@ class Overlay {
   void DrawIcons(ID2D1DeviceContext* dc, int width, int height);
   [[nodiscard]] ID2D1Bitmap* IconBitmap(HICON icon, int px) const;
   static void DrawPlaceholder(ID2D1DeviceContext* dc, const D2D1_RECT_F& cell);
+  void DrawHighlight(ID2D1DeviceContext* dc,
+                     const D2D1_RECT_F& cell) const;
+  void HandleMouseMove(HWND hwnd, POINT pt);
+  void ClearHover();
+
+  static constexpr size_t kNoHover = static_cast<size_t>(-1);
 
   HWND hwnd_ = nullptr;
   HMONITOR monitor_ = nullptr;
   RECT strip_ = {};
   bool dirty_ = true;
   bool dark_ = false;
+  bool tracking_ = false;
+  size_t hovered_ = kNoHover;
+  std::unique_ptr<Tooltip> tooltip_;
   std::vector<IconView> icons_;
   std::vector<RECT> cells_;  // strip-local, one per drawn icon (hit-testing)
   std::function<void()> onGeometryInvalidated_;
