@@ -110,11 +110,19 @@ TEST_F(SharedRingFixture, DaclAllowsOnlySystemAndCurrentUser) {
   EXPECT_EQ(sids.find(L"S-1-1-0"), sids.end());  // no Everyone
 }
 
-TEST_F(SharedRingFixture, SecondCreateFails) {
+TEST_F(SharedRingFixture, SecondCreateAdoptsTheSameRing) {
+  // Single instance is guarded by the mutex (spec 7.4), not the mapping:
+  // a taken name means an orphaned ring after a host crash — adopt it.
   SharedRingHandle second = {};
   wchar_t err[256] = {};
-  EXPECT_FALSE(SharedRingCreate(&second, 1, err, 256));
-  EXPECT_NE(err[0], L'\0');
+  EXPECT_TRUE(SharedRingCreate(&second, 999, err, 256)) << err;
+
+  // Same bytes: the second handle aliases the first.
+  h_.header->hookAlive = 77;
+  EXPECT_EQ(second.header->hookAlive, 77u);
+  EXPECT_EQ(second.header->explorerPid, 999u);  // refreshed by the adopter
+
+  SharedRingClose(&second);
 }
 
 TEST_F(SharedRingFixture, SignalEventIsAutoResetAndNotSignaled) {

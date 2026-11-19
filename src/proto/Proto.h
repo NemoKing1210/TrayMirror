@@ -17,6 +17,9 @@ inline constexpr size_t kRecordFooterSize = 4;       // trailing CRC32
 inline constexpr uint32_t kHostFlagDiag = 0x1;
 
 inline constexpr wchar_t kRingNameFmt[] = L"Local\\TrayMirror.Ring.v%u";
+// The full name of THIS build's mapping. A literal, not a formatted
+// string: the hook is kernel32-only and must not call CRT formatting.
+inline constexpr wchar_t kRingName[] = L"Local\\TrayMirror.Ring.v1";
 inline constexpr wchar_t kSignalEventName[] = L"Local\\TrayMirror.Signal";  // auto-reset
 inline constexpr wchar_t kOffEventName[] = L"Local\\TrayMirror.Off";        // manual-reset, latched
 inline constexpr wchar_t kSingleInstanceMutexName[] = L"Local\\TrayMirror.Single";

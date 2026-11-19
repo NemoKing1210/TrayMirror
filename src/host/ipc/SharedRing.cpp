@@ -56,12 +56,9 @@ bool SharedRingCreate(SharedRingHandle* out, DWORD explorerPid,
     saPtr = &sa;
   }
 
-  wchar_t name[64] = {};
-  _snwprintf_s(name, _TRUNCATE, kRingNameFmt, kProtoVersion);
-
   const SIZE_T viewSize = sizeof(RingHeader) + kRingSizeBytes;
   HANDLE map = CreateFileMappingW(INVALID_HANDLE_VALUE, saPtr, PAGE_READWRITE,
-                                  0, static_cast<DWORD>(viewSize), name);
+                                  0, static_cast<DWORD>(viewSize), kRingName);
   if (saPtr != nullptr) {
     LocalFree(sa.lpSecurityDescriptor);
   }
@@ -70,9 +67,46 @@ bool SharedRingCreate(SharedRingHandle* out, DWORD explorerPid,
     return false;
   }
   if (GetLastError() == ERROR_ALREADY_EXISTS) {
-    CloseHandle(map);
-    SetErr(errBuf, errCap, L"ring mapping already exists (another host?)");
-    return false;
+    // The name is taken. Two cases:
+    //  - another live host owns it: the single-instance mutex (spec 7.4)
+    //    is the guard against that, not this check;
+    //  - an orphaned ring left by a crashed host while the hook still
+    //    holds its view: adopt it and keep reading — crash recovery.
+    // A foreign or stale ring (bad magic/version) is still refused.
+    auto* view = static_cast<uint8_t*>(
+        MapViewOfFile(map, FILE_MAP_ALL_ACCESS, 0, 0, 0));
+    if (view == nullptr) {
+      SetErr(errBuf, errCap, L"MapViewOfFile(existing) failed");
+      CloseHandle(map);
+      return false;
+    }
+    const auto* header = reinterpret_cast<const RingHeader*>(view);
+    if (header->magic != kRingMagic || header->protoVersion != kProtoVersion) {
+      SetErr(errBuf, errCap,
+             L"existing ring mapping is not ours (wrong magic/version)");
+      UnmapViewOfFile(view);
+      CloseHandle(map);
+      return false;
+    }
+    // Adopted: keep positions/heartbeat, refresh explorerPid, raise the
+    // host flag word to zero (a new host session starts non-diagnostic).
+    auto* vol = reinterpret_cast<volatile RingHeader*>(view);
+    vol->explorerPid = explorerPid;
+    vol->flags = 0;
+
+    HANDLE signal = CreateEventW(nullptr, FALSE, FALSE, kSignalEventName);
+    if (signal == nullptr) {
+      SetErr(errBuf, errCap, L"CreateEventW(signal) failed");
+      UnmapViewOfFile(view);
+      CloseHandle(map);
+      return false;
+    }
+    out->map = map;
+    out->signalEvent = signal;
+    out->view = view;
+    out->header = vol;
+    out->ring = view + sizeof(RingHeader);
+    return true;
   }
 
   auto* view = static_cast<uint8_t*>(
@@ -115,10 +149,8 @@ bool SharedRingCreate(SharedRingHandle* out, DWORD explorerPid,
 
 bool SharedRingOpenRead(SharedRingHandle* out) {
   *out = {};
-  wchar_t name[64] = {};
-  _snwprintf_s(name, _TRUNCATE, kRingNameFmt, kProtoVersion);
 
-  HANDLE map = OpenFileMappingW(FILE_MAP_READ, FALSE, name);
+  HANDLE map = OpenFileMappingW(FILE_MAP_READ, FALSE, kRingName);
   if (map == nullptr) {
     return false;
   }
