@@ -89,6 +89,45 @@ const wchar_t* KnownMessageName(UINT msg, UINT callback, UINT taskbarCreated) {
   return L"";
 }
 
+// The event carried in the low word of a tray callback's lParam (S4
+// measurement): mouse messages for v0 targets, NIN_* for v4 targets.
+const wchar_t* KnownEventName(UINT event) {
+  switch (event) {
+    case WM_LBUTTONDOWN:
+      return L"WM_LBUTTONDOWN";
+    case WM_LBUTTONUP:
+      return L"WM_LBUTTONUP";
+    case WM_LBUTTONDBLCLK:
+      return L"WM_LBUTTONDBLCLK";
+    case WM_RBUTTONDOWN:
+      return L"WM_RBUTTONDOWN";
+    case WM_RBUTTONUP:
+      return L"WM_RBUTTONUP";
+    case WM_MOUSEMOVE:
+      return L"WM_MOUSEMOVE";
+    case WM_CONTEXTMENU:
+      return L"WM_CONTEXTMENU";
+    case NIN_SELECT:
+      return L"NIN_SELECT";
+    case NIN_KEYSELECT:
+      return L"NIN_KEYSELECT";
+    case NIN_POPUPOPEN:
+      return L"NIN_POPUPOPEN";
+    case NIN_POPUPCLOSE:
+      return L"NIN_POPUPCLOSE";
+    case NIN_BALLOONSHOW:
+      return L"NIN_BALLOONSHOW";
+    case NIN_BALLOONHIDE:
+      return L"NIN_BALLOONHIDE";
+    case NIN_BALLOONTIMEOUT:
+      return L"NIN_BALLOONTIMEOUT";
+    case NIN_BALLOONUSERCLICK:
+      return L"NIN_BALLOONUSERCLICK";
+    default:
+      return L"";
+  }
+}
+
 // --- emulator state -------------------------------------------------------------
 
 struct Options g_opts;
@@ -195,9 +234,21 @@ LRESULT CALLBACK EmuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     return 0;
   }
   const wchar_t* name = KnownMessageName(msg, kCallbackMessage, g_taskbarCreated);
-  EmuLogf(L"msg=0x%04X name=%ls wParam=0x%llX lParam=0x%llX", msg, name,
-          static_cast<unsigned long long>(wParam),
+  const bool isCallback = msg == kCallbackMessage;
+  const wchar_t* eventName =
+      isCallback ? KnownEventName(static_cast<UINT>(lParam) & 0xFFFFU) : L"";
+  EmuLogf(L"msg=0x%04X name=%ls event=%ls wParam=0x%llX lParam=0x%llX", msg,
+          name, eventName, static_cast<unsigned long long>(wParam),
           static_cast<unsigned long long>(lParam));
+  if (isCallback) {
+    // v0: HIWORD(lParam) is the icon id; v4 adds the screen point in
+    // wParam. Both are logged undecoded above and decoded here (S4).
+    const UINT iconId = static_cast<UINT>(lParam) >> 16;
+    const LONG coords = static_cast<LONG>(wParam);
+    const POINTS point = MAKEPOINTS(coords);
+    EmuLogf(L"callback detail uid=%u wParamPoint=%d,%d", iconId, point.x,
+            point.y);
+  }
   return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
