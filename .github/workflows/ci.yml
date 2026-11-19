@@ -11,12 +11,42 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # vcpkg is preinstalled on GitHub windows runners; manifest mode
-      # (vcpkg.json) installs spdlog and gtest during configure.
+      # The runner ships MSVC, but not its environment: the Ninja
+      # generator needs cl.exe, link.exe, mt.exe (manifest embedding is a
+      # post-build step) on PATH.
+      - name: Set up the MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # vcpkg is preinstalled on the image (manifest mode installs spdlog
+      # and gtest during configure). Its location is published as
+      # VCPKG_INSTALLATION_ROOT; the documented location is the fallback.
+      # Ninja is installed on demand so a missing tool cannot be mistaken
+      # for a project failure.
+      - name: Locate the toolchain
+        shell: pwsh
+        run: |
+          $vcpkg = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $vcpkg) { $vcpkg = 'C:\vcpkg' }
+          $toolchain = Join-Path $vcpkg 'scripts\buildsystems\vcpkg.cmake'
+          if (-not (Test-Path $toolchain)) {
+            throw "vcpkg toolchain file not found under '$vcpkg'"
+          }
+          "TRAYMIRROR_VCPKG=$vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "vcpkg: $vcpkg"
+          if (-not (Get-Command ninja.exe -ErrorAction SilentlyContinue)) {
+            choco install ninja -y --no-progress
+          }
+          ninja --version
+          cmake --version
+
       - name: Configure
-        run: >
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-          -DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake
+        shell: pwsh
+        run: |
+          $toolchain = Join-Path $env:TRAYMIRROR_VCPKG 'scripts\buildsystems\vcpkg.cmake'
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug `
+            "-DCMAKE_TOOLCHAIN_FILE=$toolchain"
 
       - name: Build
         run: cmake --build build
@@ -28,3 +58,8 @@ jobs:
       # installation. This step never touches a live Explorer.
       - name: Selftest
         run: build/src/host/TrayMirror.exe --selftest
+
+      - name: Host log
+        if: failure()
+        run: Get-Content "$env:LOCALAPPDATA\TrayMirror\logs\host.log" -Tail 80
+        continue-on-error: true
