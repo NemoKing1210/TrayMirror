@@ -30,10 +30,18 @@ struct Options {
   DWORD durMs = 5000;
   bool v4 = false;
   bool hidden = false;
+  bool guid = false;
   bool readdOnTaskbarCreated = false;
   std::wstring balloonTitle = L"EmuTitle";
   std::wstring balloonText = L"EmuText";
 };
+
+// Stage 2 payload-field measurement (plan task 1): a fixed, easily
+// recognizable GUID so the dump can locate guidItem by its marker dwords.
+constexpr GUID kGuidMarker = {0x11223344,
+                              0x5566,
+                              0x7788,
+                              {0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00}};
 
 // --- logging -------------------------------------------------------------------
 
@@ -102,16 +110,25 @@ bool AddIcon(UINT uid, bool withBalloon) {
     nid.dwState = NIS_HIDDEN;
     nid.dwStateMask = NIS_HIDDEN;
   }
+  if (g_opts.guid) {
+    nid.uFlags |= NIF_GUID;
+    nid.guidItem = kGuidMarker;
+  }
   if (withBalloon) {
     nid.uFlags |= NIF_INFO;
     wcscpy_s(nid.szInfoTitle, g_opts.balloonTitle.c_str());
     wcscpy_s(nid.szInfo, g_opts.balloonText.c_str());
   }
+  if (g_opts.guid) {
+    EmuLogf(
+        L"GUID MARKER flags=0x%X guid={11223344-5566-7788-99AA-BBCCDDEEFF00}",
+        nid.uFlags);
+  }
   const BOOL ok = Shell_NotifyIconW(NIM_ADD, &nid);
-  EmuLogf(L"ICON ADD %s hwnd=0x%llX uid=%u tip=\"%s\" callback=0x%X v4=%d hidden=%d wow64=%d",
+  EmuLogf(L"ICON ADD %s hwnd=0x%llX uid=%u tip=\"%s\" callback=0x%X v4=%d hidden=%d guid=%d wow64=%d",
           ok ? L"ok" : L"FAILED", reinterpret_cast<unsigned long long>(g_hwnd), uid,
           g_opts.tip.c_str(), kCallbackMessage, g_opts.v4 ? 1 : 0,
-          g_opts.hidden ? 1 : 0, g_wow64 ? 1 : 0);
+          g_opts.hidden ? 1 : 0, g_opts.guid ? 1 : 0, g_wow64 ? 1 : 0);
   std::printf("%s ADD uid=%u\n", ok ? "" : "FAILED:", uid);
   if (!ok) return false;
   if (g_opts.v4) {
@@ -237,6 +254,7 @@ void PrintUsage() {
       "  --dur ms       run duration, default 5000\n"
       "  --v4           NIM_SETVERSION NOTIFYICON_VERSION_4 after ADD\n"
       "  --hidden       NIF_STATE NIS_HIDDEN\n"
+      "  --guid         NIF_GUID with the fixed marker GUID (payload measurement)\n"
       "  --readd-on-taskbarcreated   re-issue NIM_ADD (without NIF_INFO) on broadcast\n"
       "  --title T --text X  balloon mode\n");
 }
@@ -260,6 +278,7 @@ bool ParseOptions(int argc, wchar_t** argv, Options* o) {
     else if (a == L"--dur" && i + 1 < argc) o->durMs = static_cast<DWORD>(wcstoul(argv[++i], nullptr, 10));
     else if (a == L"--v4") o->v4 = true;
     else if (a == L"--hidden") o->hidden = true;
+    else if (a == L"--guid") o->guid = true;
     else if (a == L"--readd-on-taskbarcreated") o->readdOnTaskbarCreated = true;
     else if (a == L"--title" && i + 1 < argc) o->balloonTitle = argv[++i];
     else if (a == L"--text" && i + 1 < argc) o->balloonText = argv[++i];
