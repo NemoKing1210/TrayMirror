@@ -1,0 +1,7 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "traymirror",
+  "version-string": "0.1.0",
+  "builtin-baseline": "7a4d8f69f0ea932fca49534c947455cf10a728b8",
+  "dependencies": ["spdlog", "gtest"]
+}

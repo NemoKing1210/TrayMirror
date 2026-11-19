@@ -1,0 +1,2 @@
+add_executable(TrayMirrorDump TrayMirrorDump.cpp)
+target_link_libraries(TrayMirrorDump PRIVATE traymirror_proto)

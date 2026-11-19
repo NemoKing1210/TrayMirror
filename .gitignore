@@ -11,6 +11,10 @@ out/
 bin/
 obj/
 
+# --- vcpkg checkout (local tooling, bootstrapped by scripts/build.ps1) ---
+.vcpkg/
+vcpkg_installed/
+
 # --- CMake / Ninja leftovers from an accidental in-source build ---
 CMakeCache.txt
 CMakeFiles/

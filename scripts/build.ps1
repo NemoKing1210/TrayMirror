@@ -1,4 +1,4 @@
-# Build TrayMirror spikes. Spec 12.8 — MSVC only.
+# Build TrayMirror. Spec 12.8 — MSVC only.
 # Usage:
 #   scripts\build.ps1                 # x64 -> build\
 #   scripts\build.ps1 -Arch win32     # x86 -> build-x86\ (WOW64 spikes)
@@ -21,14 +21,29 @@ foreach ($p in @($CmakeBin, $NinjaBin, $Vcvars)) {
     if (-not (Test-Path $p)) { Write-Error "Not found: $p"; exit 1 }
 }
 
+$Repo = Split-Path -Parent $PSScriptRoot
+
+# Dependencies (spdlog, googletest) come from vcpkg manifest mode. The
+# .vcpkg checkout is local, git-ignored tooling; bootstrap once, then reuse.
+$VcpkgRoot = Join-Path $Repo '.vcpkg'
+$VcpkgExe  = Join-Path $VcpkgRoot 'vcpkg.exe'
+$VcpkgToolchain = Join-Path $VcpkgRoot 'scripts\buildsystems\vcpkg.cmake'
+if (-not (Test-Path $VcpkgExe)) {
+    Write-Host 'vcpkg: cloning (first run only)...'
+    git clone --depth 1 https://github.com/microsoft/vcpkg.git $VcpkgRoot
+    if ($LASTEXITCODE -ne 0) { Write-Error 'vcpkg clone failed'; exit 1 }
+    cmd /c "`"$VcpkgRoot\bootstrap-vcpkg.bat`" -disableMetrics"
+    if ($LASTEXITCODE -ne 0) { Write-Error 'vcpkg bootstrap failed'; exit 1 }
+}
+if (-not (Test-Path $VcpkgToolchain)) { Write-Error "Not found: $VcpkgToolchain"; exit 1 }
+
 if (-not $BuildDir) { $BuildDir = if ($Arch -eq 'x64') { 'build' } else { 'build-x86' } }
 $VcArch = if ($Arch -eq 'x64') { 'x64' } else { 'x86' }
 
-$Repo = Split-Path -Parent $PSScriptRoot
 $BuildPath = Join-Path $Repo $BuildDir
 
 # CMake and Ninja are not in PATH: prepend them for the duration of the call.
 $env:Path = "$CmakeBin;$NinjaBin;$env:Path"
 
-cmd /s /c "`"$Vcvars`" $VcArch && cmake -S `"$Repo`" -B `"$BuildPath`" -G Ninja -DCMAKE_BUILD_TYPE=$Config && cmake --build `"$BuildPath`""
+cmd /s /c "`"$Vcvars`" $VcArch && cmake -S `"$Repo`" -B `"$BuildPath`" -G Ninja -DCMAKE_BUILD_TYPE=$Config -DCMAKE_TOOLCHAIN_FILE=`"$VcpkgToolchain`" && cmake --build `"$BuildPath`""
 exit $LASTEXITCODE
