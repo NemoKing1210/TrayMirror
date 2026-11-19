@@ -335,11 +335,17 @@ void Overlay::HandleMouseMove(HWND hwnd, POINT pt) {
   }
   size_t index = kNoHover;
   if (!HitTestIcon(cells_, pt, &index)) {
+    if (hovered_ != kNoHover) {
+      DispatchLeave();  // the pointer left the icon for the gap
+    }
     ClearHover();
     return;
   }
   if (index == hovered_) {
     return;
+  }
+  if (hovered_ != kNoHover) {
+    DispatchLeave();  // the pointer left the previously hovered cell
   }
   hovered_ = index;
   dirty_ = true;
@@ -359,6 +365,8 @@ void Overlay::HandleMouseMove(HWND hwnd, POINT pt) {
   } else if (tooltip_ != nullptr) {
     tooltip_->Hide();
   }
+  // The pointer entered this cell: v4 owners get NIN_POPUPOPEN (report 07).
+  DispatchGesture(TrayEvent::kMouseEnter, pt);
 }
 
 void Overlay::DispatchGesture(TrayEvent event, POINT pt) {

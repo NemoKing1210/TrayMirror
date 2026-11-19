@@ -512,3 +512,48 @@ TEST(OverlayStrip, NewestIconIsLeftmost) {
   thread.Stop();
 }
 
+
+// v4 owners learn about the pointer crossing an icon boundary through
+// NIN_POPUPOPEN / NIN_POPUPCLOSE (report 07). The overlay maps cell
+// changes to those gestures: enter on arriving, leave on moving to
+// another cell or out of the strip.
+TEST(OverlayClick, EnterAndLeaveEmitPopupEvents) {
+  const MonitorTaskbar mt = SyntheticTaskbar();
+  const RECT strip = ComputeOverlayStripRect(mt, 200);
+  std::vector<DispatchCall> calls;
+  auto overlay = Overlay::Create(
+      mt.monitor, strip, {}, [&](const DispatchCall& call) {
+        calls.push_back(call);
+      });
+  ASSERT_NE(overlay, nullptr);
+  overlay->SetIcons(
+      {FirstIcon(MakeTarget(reinterpret_cast<HWND>(0x1234))),
+       FirstIcon(MakeTarget(reinterpret_cast<HWND>(0x5678)))});
+  overlay->Render();
+
+  const int height = strip.bottom - strip.top;
+  const int slot = traymirror::IconPxForDpi(96) + traymirror::IconGapPxForDpi(96);
+  SendMessageW(overlay->hwnd(), WM_MOUSEMOVE, 0, MAKELPARAM(4, height / 2));
+  SendMessageW(overlay->hwnd(), WM_MOUSEMOVE, 0,
+               MAKELPARAM(4 + slot, height / 2));
+  SendMessageW(overlay->hwnd(), WM_MOUSELEAVE, 0, 0);
+
+  std::vector<TrayEvent> boundary;
+  for (const DispatchCall& call : calls) {
+    if (call.event == TrayEvent::kMouseEnter ||
+        call.event == TrayEvent::kMouseLeave) {
+      boundary.push_back(call.event);
+    }
+  }
+  ASSERT_EQ(boundary.size(), 4U);
+  EXPECT_EQ(boundary[0], TrayEvent::kMouseEnter);  // cell 0
+  EXPECT_EQ(boundary[1], TrayEvent::kMouseLeave);  // cell 0, moving right
+  EXPECT_EQ(boundary[2], TrayEvent::kMouseEnter);  // cell 1
+  EXPECT_EQ(boundary[3], TrayEvent::kMouseLeave);  // cell 1, out of strip
+
+  // The leave must name the icon it left: the first two calls target the
+  // first icon, the last two the second.
+  ASSERT_GE(calls.size(), 4U);
+  EXPECT_EQ(calls[0].target.owner, reinterpret_cast<HWND>(0x1234));
+  EXPECT_EQ(calls[3].target.owner, reinterpret_cast<HWND>(0x5678));
+}

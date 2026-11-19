@@ -21,6 +21,9 @@ enum class TrayEvent : uint8_t {
   kRightUp,
   kMouseMove,
   kMouseLeave,
+  // Appended, never inserted: the numeric values are what the acceptance
+  // runbooks select in the host log (event=0..4 are clicks).
+  kMouseEnter,  // the pointer entered an icon cell (v4: NIN_POPUPOPEN)
 };
 
 // The icon owner a callback must be replayed to. `version` is the
