@@ -1,11 +1,13 @@
 #include "render/Overlay.h"
 
 #include "Log.h"
+#include "win/Monitors.h"
 
 #include <d2d1helper.h>
 
 #include <bit>
 #include <iterator>
+#include <set>
 #include <utility>
 
 namespace traymirror {
@@ -255,11 +257,13 @@ void Overlay::Render() {
     return;  // degraded: composition unavailable
   }
   auto log = InitHostLogging("");
+  const int width = strip_.right - strip_.left;
+  const int height = strip_.bottom - strip_.top;
+  RECT update = {};
+  update.right = width;
+  update.bottom = height;
   POINT offset = {};
   Microsoft::WRL::ComPtr<ID2D1DeviceContext> dc;
-  RECT update = {};
-  update.right = strip_.right - strip_.left;
-  update.bottom = strip_.bottom - strip_.top;
   HRESULT hr = surface_->BeginDraw(&update, IID_PPV_ARGS(dc.GetAddressOf()),
                                    &offset);
   if (FAILED(hr) != 0 || dc == nullptr) {
@@ -270,6 +274,7 @@ void Overlay::Render() {
       static_cast<float>(offset.x), static_cast<float>(offset.y)));
   const D2D1_COLOR_F background = dark_ ? kDarkBackground : kLightBackground;
   dc->Clear(&background);
+  DrawIcons(dc.Get(), width, height);
   hr = surface_->EndDraw();
   if (FAILED(hr) != 0) {
     log->warn("surface EndDraw failed ({:#x})", static_cast<unsigned>(hr));
@@ -279,6 +284,122 @@ void Overlay::Render() {
   if (FAILED(hr) != 0) {
     log->warn("composition commit failed ({:#x})", static_cast<unsigned>(hr));
   }
+}
+
+void Overlay::DrawIcons(ID2D1DeviceContext* dc, int width, int height) {
+  cells_.clear();
+  UINT dpi = GetDpiForWindow(hwnd_);
+  if (dpi == 0) {
+    dpi = 96;
+  }
+  const int iconPx = IconPxForDpi(dpi);
+  const int gap = IconGapPxForDpi(dpi);
+  const int top = (height - iconPx) / 2;
+  std::set<IconCacheKey> live;
+  int x = 0;
+  for (const IconView& icon : icons_) {
+    if (x + iconPx > width) {
+      break;  // the tail is clipped: stage 2 has no chevron (R6)
+    }
+    ID2D1Bitmap* bitmap = cache_.Get(icon.icon, icon.serial, iconPx);
+    live.insert(
+        IconCacheKey{.icon = icon.icon, .serial = icon.serial, .px = iconPx});
+    const D2D1_RECT_F cell =
+        D2D1::RectF(static_cast<float>(x), static_cast<float>(top),
+                    static_cast<float>(x + iconPx),
+                    static_cast<float>(top + iconPx));
+    if (bitmap != nullptr) {
+      dc->DrawBitmap(bitmap, cell, 1.0F, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+    } else {
+      DrawPlaceholder(dc, cell);
+    }
+    cells_.push_back(RECT{.left = x,
+                          .top = top,
+                          .right = x + iconPx,
+                          .bottom = top + iconPx});
+    x += iconPx + gap;
+  }
+  cache_.Prune(live);
+}
+
+void Overlay::DrawPlaceholder(ID2D1DeviceContext* dc,
+                              const D2D1_RECT_F& cell) {
+  Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
+  const D2D1_COLOR_F color = {.r = 0.5F, .g = 0.5F, .b = 0.5F, .a = 0.55F};
+  if (FAILED(dc->CreateSolidColorBrush(color, brush.GetAddressOf())) != 0 ||
+      brush == nullptr) {
+    return;
+  }
+  dc->FillRoundedRectangle(D2D1::RoundedRect(cell, 2.0F, 2.0F), brush.Get());
+}
+
+ID2D1Bitmap* Overlay::IconBitmap(HICON icon, int px) const {
+  // An HICON becomes pixels through a 32-bpp DIB section; DrawIconEx
+  // gives straight alpha, and D2D wants premultiplied, so the buffer is
+  // premultiplied in place before the bitmap is created.
+  if (d2dContext_ == nullptr || icon == nullptr || px <= 0) {
+    return nullptr;
+  }
+  BITMAPV5HEADER header = {};
+  header.bV5Size = sizeof(header);
+  header.bV5Width = px;
+  header.bV5Height = -px;  // top-down
+  header.bV5Planes = 1;
+  header.bV5BitCount = 32;
+  header.bV5Compression = BI_BITFIELDS;
+  header.bV5RedMask = 0x00FF0000U;
+  header.bV5GreenMask = 0x0000FF00U;
+  header.bV5BlueMask = 0x000000FFU;
+  header.bV5AlphaMask = 0xFF000000U;
+
+  const HDC screen = GetDC(nullptr);
+  if (screen == nullptr) {
+    return nullptr;
+  }
+  void* bits = nullptr;
+  const HBITMAP dib =
+      CreateDIBSection(screen, reinterpret_cast<BITMAPINFO*>(&header),
+                       DIB_RGB_COLORS, &bits, nullptr, 0);
+  const HDC memory = CreateCompatibleDC(screen);
+  HGDIOBJ previous = nullptr;
+  if (dib != nullptr && memory != nullptr && bits != nullptr) {
+    previous = SelectObject(memory, dib);
+    PatBlt(memory, 0, 0, px, px, BLACKNESS);
+    DrawIconEx(memory, 0, 0, icon, px, px, 0, nullptr, DI_NORMAL);
+  }
+  if (previous != nullptr) {
+    SelectObject(memory, previous);
+  }
+  if (memory != nullptr) {
+    DeleteDC(memory);
+  }
+  ReleaseDC(nullptr, screen);
+
+  Microsoft::WRL::ComPtr<ID2D1Bitmap> bitmap;
+  if (dib != nullptr && bits != nullptr) {
+    auto* pixels = static_cast<uint32_t*>(bits);
+    const int count = px * px;
+    for (int i = 0; i < count; ++i) {
+      const uint32_t argb = pixels[i];
+      const uint32_t alpha = argb >> 24;
+      const uint32_t red = ((argb >> 16) & 0xFFU) * alpha / 255U;
+      const uint32_t green = ((argb >> 8) & 0xFFU) * alpha / 255U;
+      const uint32_t blue = (argb & 0xFFU) * alpha / 255U;
+      pixels[i] = (alpha << 24) | (red << 16) | (green << 8) | blue;
+    }
+    const D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                          D2D1_ALPHA_MODE_PREMULTIPLIED));
+    const auto size = static_cast<UINT32>(px);
+    const HRESULT hr = d2dContext_->CreateBitmap(
+        D2D1::SizeU(size, size), pixels, size * 4U, &props,
+        bitmap.GetAddressOf());
+    if (FAILED(hr) != 0) {
+      bitmap.Reset();
+    }
+    DeleteObject(dib);
+  }
+  return bitmap.Detach();
 }
 
 }  // namespace traymirror

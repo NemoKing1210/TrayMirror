@@ -73,8 +73,27 @@ TEST(OverlaySmoke, StripMatchesGeometry) {
   EXPECT_EQ(actual.bottom, strip.bottom);
 }
 
-TEST(OverlaySmoke, UiWindowExistsWhileRunning) {
-  auto enumerate = []() {
+TEST(OverlaySmoke, DrawsIconsWithRealD2D) {
+  const MonitorTaskbar mt = SyntheticTaskbar();
+  const RECT strip = ComputeOverlayStripRect(mt, 200);
+  auto overlay = Overlay::Create(mt.monitor, strip);
+  ASSERT_NE(overlay, nullptr);
+
+  // Real icons plus one null handle (the placeholder path). A device
+  // failure inside drawing must degrade to a log line, never a crash.
+  overlay->SetIcons(
+      {traymirror::IconView{.icon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512)),
+                            .serial = 1,
+                            .tip = L"first"},
+       traymirror::IconView{.icon = LoadIconW(nullptr, MAKEINTRESOURCEW(32513)),
+                            .serial = 2,
+                            .tip = L"second"},
+       traymirror::IconView{.icon = nullptr, .serial = 3, .tip = L"missing"}});
+  overlay->Render();
+  overlay->Render();  // clean: no dirty flag, no redraw
+}
+
+TEST(OverlaySmoke, UiWindowExistsWhileRunning) {  auto enumerate = []() {
     return std::vector<MonitorTaskbar>{SyntheticTaskbar()};
   };
   ModelInbox inbox;

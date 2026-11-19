@@ -9,7 +9,8 @@ add_library(traymirror_host STATIC
             HookInstall.cpp ReaderThread.cpp Log.cpp HostApp.cpp
             core/TrayModel.cpp core/InitialSync.cpp core/ModelInbox.cpp
             win/Monitors.cpp
-            render/Overlay.cpp render/OverlayThread.cpp)
+            render/Overlay.cpp render/OverlayThread.cpp
+            render/IconCache.cpp)
 target_include_directories(traymirror_host PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(traymirror_host
                       PUBLIC traymirror_proto

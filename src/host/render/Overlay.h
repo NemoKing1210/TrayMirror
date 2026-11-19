@@ -4,6 +4,8 @@
 // the overlay thread; the model stays off this type.
 #pragma once
 
+#include "render/IconCache.h"
+
 #include <windows.h>
 
 #include <d2d1_1.h>
@@ -55,6 +57,9 @@ class Overlay {
   bool InitComposition();
   void ReleaseComposition();
   void ApplyTheme();
+  void DrawIcons(ID2D1DeviceContext* dc, int width, int height);
+  [[nodiscard]] ID2D1Bitmap* IconBitmap(HICON icon, int px) const;
+  static void DrawPlaceholder(ID2D1DeviceContext* dc, const D2D1_RECT_F& cell);
 
   HWND hwnd_ = nullptr;
   HMONITOR monitor_ = nullptr;
@@ -62,7 +67,9 @@ class Overlay {
   bool dirty_ = true;
   bool dark_ = false;
   std::vector<IconView> icons_;
+  std::vector<RECT> cells_;  // strip-local, one per drawn icon (hit-testing)
   std::function<void()> onGeometryInvalidated_;
+  IconCache cache_{[this](HICON icon, int px) { return IconBitmap(icon, px); }};
 
   Microsoft::WRL::ComPtr<ID3D11Device> d3d_;
   Microsoft::WRL::ComPtr<ID2D1Factory1> d2dFactory_;
