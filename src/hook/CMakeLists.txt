@@ -16,3 +16,13 @@ set_target_properties(TrayMirrorHook PROPERTIES
                       PREFIX ""
                       MSVC_RUNTIME_LIBRARY "MultiThreaded")
 target_link_libraries(TrayMirrorHook PRIVATE traymirror_proto_hook)
+
+# The selftest and the guarded run both load TrayMirrorHook.dll next to
+# the host exe (spec 7.1). The copy belongs to THIS target: a hook-only
+# rebuild must refresh the host-dir copy (a POST_BUILD on the exe never
+# fires when only the DLL relinks, and the host then silently injects a
+# stale hook).
+add_custom_command(
+  TARGET TrayMirrorHook POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:TrayMirrorHook>
+          $<TARGET_FILE_DIR:TrayMirror>)

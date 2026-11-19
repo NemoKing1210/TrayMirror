@@ -13,11 +13,3 @@ target_link_libraries(traymirror_host PUBLIC traymirror_proto
 
 add_executable(TrayMirror main.cpp)
 target_link_libraries(TrayMirror PRIVATE traymirror_host)
-
-# The selftest and the guarded run both load TrayMirrorHook.dll next to
-# the exe (spec 7.1: the hook ships beside the host). Keep the build
-# tree in that shape.
-add_custom_command(
-  TARGET TrayMirror POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:TrayMirrorHook>
-          $<TARGET_FILE_DIR:TrayMirror>)
