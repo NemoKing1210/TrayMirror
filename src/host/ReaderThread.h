@@ -18,5 +18,10 @@ using RecordSink =
     std::function<void(const RingRecordHeader&, const TrayMessage&)>;
 
 // Returns when the stop event is signaled and the ring is drained.
+// `resync` (optional) is the manual-resync event; `onResync` (optional)
+// is invoked on overflow and when `resync` is signaled. Both are host
+// plumbing (spec 4.3); onResync must not block the reader.
 void ReaderLoop(volatile RingHeader* header, volatile uint8_t* ring,
-                HANDLE signal, HANDLE stop, const RecordSink& sink);
+                HANDLE signal, HANDLE stop, const RecordSink& sink,
+                HANDLE resync = nullptr,
+                const std::function<void()>& onResync = {});

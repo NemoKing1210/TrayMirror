@@ -7,6 +7,7 @@
 #include "Ring.h"
 #include "RingReader.h"
 #include "TrayPayload.h"
+#include "core/InitialSync.h"
 #include "ipc/SharedRing.h"
 #include "ipc/SingleInstance.h"
 
@@ -282,6 +283,8 @@ bool HostAppParseArgs(const wchar_t* const* argv, int argc,
       out->disableHook = true;
     } else if (a == L"--diagnostic") {
       out->diagnostic = true;
+    } else if (a == L"--resync") {
+      out->resync = true;
     } else if (a == L"--duration" && i + 1 < argc) {
       out->durationSec = ToInt(argv[++i]);
       if (out->durationSec <= 0) {
@@ -332,6 +335,13 @@ const char* NimName(uint32_t nim) {
 }  // namespace
 
 int HostAppRun(const HostAppConfig& config) {
+  // (0) Manual resync (spec 4.3): signal a running host and exit. This
+  // runs before the single-instance acquire — the point is to reach the
+  // instance that holds it.
+  if (config.resync) {
+    return traymirror::SignalResync() ? 0 : 6;
+  }
+
   // (1) Single instance (spec 7.4).
   SingleInstance single;
   if (!single.Acquire()) {
@@ -424,19 +434,37 @@ int HostAppRun(const HostAppConfig& config) {
   }
   log->info("hook installed (explorer pid {})", hi.explorerPid);
 
-  // (5) The reader thread.
+  // (5) The reader thread and initial synchronization (spec 4.3): the
+  // manual-resync event (auto-reset: one signal, one sync) and the
+  // TaskbarCreated broadcast that the startup sync and every later
+  // resync use. Measured safe on a live tray in spike S3 — Explorer
+  // dedups, apps re-assert SETVERSION, no balloon repeats.
+  HANDLE resyncEvent =
+      CreateEventW(nullptr, FALSE, FALSE, traymirror::kResyncEventName);
+  if (resyncEvent == nullptr) {
+    log->warn("resync event creation failed ({}); manual resync disabled",
+              GetLastError());
+  }
+  const traymirror::BroadcastFn broadcast =
+      traymirror::DefaultTaskbarCreatedBroadcast();
   const HANDLE signal = ring.signalEvent;
   std::thread reader([header = ring.header, ringBytes = ring.ring, signal,
-                      readerStop, &log]() {
-    ReaderLoop(header, ringBytes, signal, readerStop,
-               [&log](const RingRecordHeader&, const TrayMessage& msg) {
-                 log->info(
-                     "NIM_{} hwnd={:#x} uid={:#x} flags={:#x} "
-                     "callback={:#x} icon={:#x} tip=\"{}\"",
-                     NimName(msg.nim), msg.hwnd, msg.uid, msg.flags,
-                     msg.callbackMsg, msg.icon, Narrow(msg.tip));
-               });
+                      readerStop, resyncEvent, broadcast, &log]() {
+    ReaderLoop(
+        header, ringBytes, signal, readerStop,
+        [&log](const RingRecordHeader&, const TrayMessage& msg) {
+          log->info("NIM_{} hwnd={:#x} uid={:#x} flags={:#x} "
+                    "callback={:#x} icon={:#x} tip=\"{}\"",
+                    NimName(msg.nim), msg.hwnd, msg.uid, msg.flags,
+                    msg.callbackMsg, msg.icon, Narrow(msg.tip));
+        },
+        resyncEvent, [broadcast, &log]() {
+          broadcast();
+          log->info("resync: TaskbarCreated broadcast sent");
+        });
   });
+  broadcast();
+  log->info("initial sync: TaskbarCreated broadcast sent");
 
   // Event-driven idle (spec 12.9: no polling): the console handler sets
   // the stop event; --duration bounds the wait for scripted runs.
@@ -469,6 +497,9 @@ int HostAppRun(const HostAppConfig& config) {
   SetEvent(signal);
   reader.join();
   CloseHandle(readerStop);
+  if (resyncEvent != nullptr) {
+    CloseHandle(resyncEvent);
+  }
 
   // Self-verify the unload: the DLL must leave explorer.exe's module
   // list (the acceptance's own check).

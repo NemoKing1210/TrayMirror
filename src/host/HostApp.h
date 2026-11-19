@@ -12,6 +12,7 @@ struct HostAppConfig {
   bool selftest = false;
   bool disableHook = false;
   bool diagnostic = false;
+  bool resync = false;  // signal a running host and exit
   int durationSec = 0;  // 0: run until Ctrl+C / console close
   std::string logLevel;
 

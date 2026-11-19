@@ -7,12 +7,15 @@ int wmain(int argc, wchar_t** argv) {
   HostAppConfig config;
   if (!HostAppParseArgs(argv + 1, argc - 1, &config)) {
     std::printf(
-        "usage: TrayMirror [--selftest | --disable-hook | --diagnostic]\n"
+        "usage: TrayMirror [--selftest | --disable-hook | --diagnostic | "
+        "--resync]\n"
         "                   [--duration <sec>] [--log-level <trace|debug|"
         "info|warn|err>]\n"
         "  no arguments: run until Ctrl+C / console close\n"
         "  --selftest: exercise the hook DLL in THIS process (no Explorer)\n"
-        "  --disable-hook: arm the kill switch and exit\n");
+        "  --disable-hook: arm the kill switch and exit\n"
+        "  --resync: ask the running host to broadcast TaskbarCreated "
+        "(exit 6: no host)\n");
     return 1;
   }
   return HostAppRun(config);

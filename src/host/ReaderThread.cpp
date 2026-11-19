@@ -8,18 +8,27 @@
 #include <vector>
 
 void ReaderLoop(volatile RingHeader* header, volatile uint8_t* ring,
-                HANDLE signal, HANDLE stop, const RecordSink& sink) {
+                HANDLE signal, HANDLE stop, const RecordSink& sink,
+                HANDLE resync, const std::function<void()>& onResync) {
   auto log = InitHostLogging("");
   std::vector<uint8_t> buf(kRecordHeaderSize + kMaxPayloadBytes +
                            kRecordFooterSize);
   std::vector<uint8_t> scratch(header->ringSize);
   uint32_t droppedSeen = 0;
 
-  HANDLE waits[2] = {stop, signal};
+  HANDLE waits[3] = {stop, signal, resync};
+  const DWORD waitCount = resync != nullptr ? 3U : 2U;
   for (;;) {
-    const DWORD w = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+    const DWORD w = WaitForMultipleObjects(waitCount, waits, FALSE, INFINITE);
     if (w == WAIT_OBJECT_0) {
       return;  // stop: the ring is left to the next host session
+    }
+    if (resync != nullptr && w == WAIT_OBJECT_0 + 2) {
+      log->info("resync requested");
+      if (onResync) {
+        onResync();
+      }
+      continue;
     }
 
     for (;;) {
@@ -56,9 +65,12 @@ void ReaderLoop(volatile RingHeader* header, volatile uint8_t* ring,
 
     const uint32_t dropped = header->droppedCount;
     if (dropped != droppedSeen) {
-      log->warn("ring overflow: {} records dropped (resync is stage 2)",
+      log->warn("ring overflow: {} records dropped; requesting resync",
                 dropped - droppedSeen);
       droppedSeen = dropped;
+      if (onResync) {
+        onResync();
+      }
     }
   }
 }
