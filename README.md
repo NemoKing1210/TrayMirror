@@ -6,12 +6,13 @@ TrayMirror mirrors the notification area (tray) from the primary taskbar onto
 secondary monitors, aiming to be indistinguishable from the original: icons,
 tooltips, clicks, context menus and balloons.
 
-> **Project status: stage 0 complete — feasibility GO.**
-> Spikes S1–S3 returned **GO**: tray `WM_COPYDATA` traffic is visible through
-> `WH_CALLWNDPROCRET` (S1), the payload layout is measured and
-> bitness-independent (S2), and `TaskbarCreated` is a safe initial-sync
-> primitive (S3). Stage 1 (protocol, host skeleton) is being planned. There is
-> no installable build yet — see the [roadmap](#roadmap).
+> **Project status: stage 1 (skeleton) — code complete, acceptance runs
+> pending.**
+> Spikes S1–S3 returned **GO** (stage 0 closed). Stage 1 built the
+> versioned ring protocol, the production hook DLL, the host process
+> with selftest, the dump tool, CI and a deterministic parser fuzz
+> corpus — ctest 6/6 green. The 100× live start/stop acceptance and the
+> first GitHub push are next. See the [roadmap](#roadmap).
 
 ---
 
@@ -49,14 +50,17 @@ Design rules that constrain every change:
 ## Repository layout
 
 ```
+src/
+  proto/           ring record format, CRC32, SPSC writer/reader, tray decoder
+  hook/            TrayMirrorHook.dll — production hook (in explorer.exe)
+  host/            TrayMirror.exe — model owner, install, reader thread, selftest
+  host/ipc/        shared ring (DACL, adopt-on-exists), single instance
+  tools/           TrayMirrorDump.exe — passive ring snapshot dump
+spikes/            stage 0 research code (kept for reference tools)
 scripts/
   build.ps1        MSVC build driver (x64 / x86)
-spikes/
-  common/          spike record format, IPC names, unit tests
-  s1/hook/         TrayMirrorSpikeHook.dll — minimal hook
-  s1/ctl/          TraySpikeCtl.exe — install/remove hook, selftest
-  s1/emu/          TrayIconEmu.exe — icon emulator and message receiver
-  s1/dump/         TraySpikeDump.exe — log dump and statistics
+  stage1-accept.ps1   stage 1 acceptance runbook (owner-run, live Explorer)
+tests/             unit (GoogleTest), integration, deterministic fuzz corpus
 ```
 
 ## Requirements
@@ -94,12 +98,29 @@ Explorer. Only the icon emulator needs an x86 build, to emulate 32-bit
 $cmake = "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin"
 & "$cmake\ctest.exe" --test-dir build --output-on-failure
 
-.\build\spikes\s1\ctl\TraySpikeCtl.exe selftest   # hook selftest, no Explorer contact
+.\build\src\host\TrayMirror.exe --selftest       # production selftest, no Explorer contact
+.\build\spikes\s1\ctl\TraySpikeCtl.exe selftest   # stage 0 hook selftest
 ```
 
 The selftest exercises the hook DLL in its own process, including the
 kill-switch and SEH scenarios. It must pass **before** the hook is ever
-installed into a live Explorer.
+installed into a live Explorer (spec 12.1). The suite includes a
+deterministic fuzz corpus over the host's record parser (200k
+edge-biased garbage buffers, ~5 s).
+
+## Stage 1 binaries
+
+All production binaries land under `build\`:
+
+| Binary | Purpose |
+|---|---|
+| `src\host\TrayMirror.exe` | The host: no args runs until Ctrl+C; `--duration <sec>`, `--selftest`, `--diagnostic`, `--log-level`, `--disable-hook` (arms the kill switch `Local\TrayMirror.Off` and exits) |
+| `src\hook\TrayMirrorHook.dll` | The production hook DLL — installed per-thread on `Shell_TrayWnd`, writes tray records into the shared ring |
+| `src\tools\TrayMirrorDump.exe` | Passive ring dump: `[--mode records\|summary] [--limit N]`; opens the mapping read-only, parses one private snapshot |
+
+Host log: `%LOCALAPPDATA%\TrayMirror\logs\host.log` (truncated per
+run). Exit codes: 0 ok, 2 already running, 3 no tray window, 4 install
+failure, 5 selftest failed.
 
 ## Stage 0 tools
 
@@ -152,7 +173,7 @@ buffer; the stage 1 protocol removes that blocking write from the tray thread.
 | Stage | Scope | Status |
 |---|---|---|
 | 0 | Research spikes S1–S9, feasibility decision | done — S1–S3 GO, verdict GO (S4–S9 folded into later stages) |
-| 1 | Skeleton: protocol, hook, host, CI, logging | in progress — being planned |
+| 1 | Skeleton: protocol, hook, host, CI, logging | code complete — 100× acceptance runs pending (owner) |
 | 2 | Icon model, first overlay rendering | planned |
 | 3 | Native behavior: v4 protocol, menus, balloons, overflow | planned |
 | 4 | Reliability: Explorer restarts, sleep, RDP, monitors, stress | planned |
