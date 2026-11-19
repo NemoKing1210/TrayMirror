@@ -17,6 +17,14 @@
 // whose header magic/version does not match this build is refused
 // (spec 2.3.4). Missing ring/event handles are retried on later calls
 // (an orphaned hook must not spin): open failures are cheap.
+//
+// Measured on Win11 build 26300 (stage 1 acceptance diagnostics,
+// 2026-11-19): WH_CALLWNDPROCRET delivers tray WM_COPYDATA with a
+// NONZERO wParam; filtering on the documented "wParam == 0 for messages
+// from another process" reading drops 100% of real tray traffic. The
+// hook does NOT filter on wParam — the S1 spike never did and captured
+// both the emulator and real applications
+// (docs/spikes/01-s1-hook-visibility.md).
 #include <windows.h>
 
 #include "Proto.h"
@@ -160,6 +168,8 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
 }
 
 LRESULT CALLBACK TrayHookProc(int code, WPARAM wp, LPARAM lp) {
+  (void)wp;  // measured nonzero for tray traffic; must not filter (see
+             // the file header note)
   if (code == HC_ACTION) {
     HookState* st = &g_state;
 
@@ -185,7 +195,7 @@ LRESULT CALLBACK TrayHookProc(int code, WPARAM wp, LPARAM lp) {
       return CallNextHookEx(nullptr, code, wp, lp);
     }
 
-    if (wp == 0 && lp != 0) {
+    if (lp != 0) {
       const auto* cwp = reinterpret_cast<const CWPRETSTRUCT*>(lp);
       if (cwp->message == WM_COPYDATA && cwp->lParam != 0) {
         HandleCopydata(reinterpret_cast<const COPYDATASTRUCT*>(cwp->lParam),

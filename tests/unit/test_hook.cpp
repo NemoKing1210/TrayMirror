@@ -138,6 +138,26 @@ TEST_F(HookFixture, TrayCopydataLandsInRingDecodable) {
   EXPECT_EQ(ring_.header->droppedCount, 0u);
 }
 
+TEST_F(HookFixture, NonzeroWparamStillRecordsTrayCopydata) {
+  // Measured on Win11 build 26300 (stage 1 acceptance diagnostics,
+  // 2026-11-19): WH_CALLWNDPROCRET delivers tray WM_COPYDATA with a
+  // NONZERO wParam — the documented "nonzero iff sent by the current
+  // process" reading does not match observed tray traffic. The hook must
+  // not filter on wParam; the S1 spike never did and captured both the
+  // emulator and real applications (docs/spikes/01-s1-hook-visibility.md).
+  const std::vector<uint8_t> data = MakeTrayData();
+  CallContext ctx;
+  BuildCall(&ctx, 1, data.data(), kTrayPayloadSize);
+
+  api_.proc(/*code=*/0, /*wp=*/1, reinterpret_cast<LPARAM>(&ctx.cwp));
+
+  RingRecordHeader hdr = {};
+  const uint8_t* payload = nullptr;
+  ASSERT_EQ(ReadNext(&hdr, &payload), RingReadStatus::Ok);
+  EXPECT_EQ(hdr.type, kRecNotifyCopydata);
+  EXPECT_GT(ring_.header->writePos, 0u);
+}
+
 TEST_F(HookFixture, NonTraySubtypeFilteredUnlessDiag) {
   const std::vector<uint8_t> data = MakeTrayData();
 
