@@ -57,9 +57,11 @@ public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
 function Get-TrayProcessId {
     $hwnd = [Win32.NativeMethods]::FindWindowW('Shell_TrayWnd', $null)
     if ($hwnd -eq [IntPtr]::Zero) { return 0 }
-    $pid = 0
-    [void][Win32.NativeMethods]::GetWindowThreadProcessId($hwnd, [ref]$pid)
-    return $pid
+    # NB: the obvious name $pid is a read-only automatic variable in
+    # PowerShell; any other spelling is fine.
+    $trayProcId = 0
+    [void][Win32.NativeMethods]::GetWindowThreadProcessId($hwnd, [ref]$trayProcId)
+    return $trayProcId
 }
 
 function Test-HookResident([int]$ProcId) {
