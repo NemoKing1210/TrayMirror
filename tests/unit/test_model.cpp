@@ -276,3 +276,83 @@ TEST_F(ModelTest, SerialBumpsOnlyOnIconReplace) {
 }
 
 }  // namespace
+
+// Stage 3 (spec 4.1/4.2): a GUID-keyed icon still registers a uID, and
+// that uID is what the owner's callback must carry — stage 2 dispatched
+// GUID icons with uid 0 (ADR-0005 debt).
+TEST_F(ModelTest, GuidIconKeepsItsUidForDispatch) {
+  traymirror::TrayModel model = MakeModel();
+  TrayMessage msg =
+      MakeMsg(0, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(window_)), 7,
+              kNifTip | kNifGuid);
+  msg.hasGuid = true;
+  msg.guid = GUID{0x33333333, 0, 0, {3}};
+  ASSERT_TRUE(model.Apply(msg));
+
+  ASSERT_EQ(model.icons().size(), 1u);
+  EXPECT_EQ(model.icons()[0].key.kind, traymirror::IconKey::Kind::kGuid);
+  EXPECT_EQ(model.icons()[0].key.uid, 7u);
+}
+
+// Stage 3 (spec 4.5): promotion state decides strip versus overflow and
+// is applied from outside the message stream.
+TEST_F(ModelTest, PromotionChangeReportsAVisibleChange) {
+  traymirror::TrayModel model = MakeModel();
+  TrayMessage msg =
+      MakeMsg(0, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(window_)), 1,
+              kNifTip);
+  ASSERT_TRUE(model.Apply(msg));
+  ASSERT_EQ(model.icons().size(), 1u);
+  EXPECT_TRUE(model.icons()[0].promoted);  // the default: shown
+
+  const traymirror::IconKey key = model.icons()[0].key;
+  EXPECT_TRUE(model.SetPromotion(key, false));
+  EXPECT_FALSE(model.icons()[0].promoted);
+  EXPECT_FALSE(model.SetPromotion(key, false));  // nothing changed
+  EXPECT_TRUE(model.SetPromotion(key, true));
+  EXPECT_TRUE(model.icons()[0].promoted);
+  EXPECT_FALSE(model.SetPromotion(traymirror::IconKey{}, true));  // unknown key
+}
+
+// Spec 4.1 lists state/stateMask; NIS_SHAREDICON must be stored like any
+// other state bit without making the icon hidden.
+TEST_F(ModelTest, SharedIconStateIsStored) {
+  traymirror::TrayModel model = MakeModel();
+  TrayMessage add =
+      MakeMsg(0, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(window_)), 1,
+              kNifTip);
+  ASSERT_TRUE(model.Apply(add));
+
+  constexpr uint32_t kNisSharedIcon = 0x2;
+  TrayMessage modify = add;
+  modify.nim = 1;  // NIM_MODIFY
+  modify.flags = kNifState;
+  modify.state = kNisSharedIcon;
+  modify.stateMask = kNisSharedIcon;
+  ASSERT_TRUE(model.Apply(modify));
+
+  const traymirror::TrayIcon& icon = model.icons()[0];
+  EXPECT_EQ(icon.state & kNisSharedIcon, kNisSharedIcon);
+  EXPECT_FALSE(icon.hidden());
+}
+
+// Stage 3 uses lastSeen for promotion matching and diagnostics: every
+// applied message refreshes it.
+TEST_F(ModelTest, LastSeenAdvancesOnEveryApply) {
+  traymirror::TrayModel model = MakeModel();
+  TrayMessage msg =
+      MakeMsg(0, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(window_)), 1,
+              kNifTip);
+  ASSERT_TRUE(model.Apply(msg));
+  const ULONGLONG first = model.icons()[0].lastSeen;
+  EXPECT_NE(first, 0u);
+
+  Sleep(5);
+  TrayMessage modify = msg;
+  modify.nim = 1;
+  modify.flags = kNifTip;
+  wcscpy_s(modify.tip, 130, L"tip-b");
+  model.Apply(modify);
+  EXPECT_GE(model.icons()[0].lastSeen, first);
+  EXPECT_STREQ(model.icons()[0].tip.c_str(), L"tip-b");
+}

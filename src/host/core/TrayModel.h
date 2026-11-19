@@ -50,6 +50,11 @@ struct TrayIcon {
   DWORD stateMask = 0;  // mask of the last NIF_STATE update
   UINT version = 0;     // 0 or 4 (NIM_SETVERSION)
   std::wstring exePath;
+  // Stage 3 (spec 4.5): registry promotion decides strip versus overflow;
+  // an icon with no matching registry entry stays promoted.
+  bool promoted = true;
+  // Tick of the last applied message (diagnostics and promotion matching).
+  ULONGLONG lastSeen = 0;
 
   [[nodiscard]] bool hidden() const noexcept { return (state & 0x1) != 0; }  // NIS_HIDDEN
 };
@@ -84,6 +89,11 @@ class TrayModel {
     return icons_;
   }
   [[nodiscard]] const TrayIcon* Find(const IconKey& key) const;
+
+  // Stage 3 (spec 4.5): applies a promotion decision from the registry.
+  // Returns true iff the visible model changed (the icon moved between
+  // the strip and the overflow).
+  bool SetPromotion(const IconKey& key, bool promoted);
 
  private:
   struct OwnerInfo {

@@ -96,6 +96,9 @@ bool TrayModel::Apply(const TrayMessage& msg) {
   if (msg.hasGuid) {
     key.kind = IconKey::Kind::kGuid;
     key.guid = msg.guid;
+    // The uID is not part of a GUID icon's identity, but it is what the
+    // owner's callback must carry (stage 2 dispatched 0 here).
+    key.uid = msg.uid;
   } else {
     key.kind = IconKey::Kind::kHwndUid;
     key.hwnd = SignExtendHwnd(msg.hwnd);
@@ -103,6 +106,10 @@ bool TrayModel::Apply(const TrayMessage& msg) {
   }
   const size_t idx = IndexOf(key);
   bool changed = false;
+  const ULONGLONG now = GetTickCount64();
+  if (idx != kNoIndex) {
+    icons_[idx].lastSeen = now;
+  }
 
   switch (msg.nim) {
     case kNimAdd: {
@@ -110,6 +117,7 @@ bool TrayModel::Apply(const TrayMessage& msg) {
       if (target == kNoIndex) {
         TrayIcon created;
         created.key = key;
+        created.lastSeen = now;
         icons_.push_back(std::move(created));
         target = icons_.size() - 1;
         changed = true;
@@ -151,6 +159,15 @@ bool TrayModel::Apply(const TrayMessage& msg) {
 const TrayIcon* TrayModel::Find(const IconKey& key) const {
   const size_t idx = IndexOf(key);
   return idx == kNoIndex ? nullptr : &icons_[idx];
+}
+
+bool TrayModel::SetPromotion(const IconKey& key, bool promoted) {
+  const size_t idx = IndexOf(key);
+  if (idx == kNoIndex || icons_[idx].promoted == promoted) {
+    return false;
+  }
+  icons_[idx].promoted = promoted;
+  return true;
 }
 
 size_t TrayModel::IndexOf(const IconKey& key) const {
