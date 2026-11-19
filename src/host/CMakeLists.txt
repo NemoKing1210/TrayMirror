@@ -8,6 +8,7 @@ add_library(traymirror_host STATIC
             ipc/SharedRing.cpp ipc/SingleInstance.cpp
             HookInstall.cpp ReaderThread.cpp Log.cpp HostApp.cpp
             core/TrayModel.cpp core/InitialSync.cpp core/ModelInbox.cpp
+            dispatch/Dispatch.cpp
             win/Monitors.cpp
             render/Overlay.cpp render/OverlayThread.cpp
             render/IconCache.cpp render/Tooltip.cpp)
