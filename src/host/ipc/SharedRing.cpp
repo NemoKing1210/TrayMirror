@@ -81,9 +81,15 @@ bool SharedRingCreate(SharedRingHandle* out, DWORD explorerPid,
       return false;
     }
     const auto* header = reinterpret_cast<const RingHeader*>(view);
-    if (header->magic != kRingMagic || header->protoVersion != kProtoVersion) {
+    // A same-name mapping with the right magic/version but a geometry
+    // no host of this build would create is hostile or corrupt: the
+    // hook trusts the published ringSize, so adopting a foreign one
+    // would make it write out of bounds inside explorer.exe. Refuse.
+    if (header->magic != kRingMagic || header->protoVersion != kProtoVersion ||
+        header->headerSize != sizeof(RingHeader) ||
+        header->ringSize != kRingSizeBytes) {
       SetErr(errBuf, errCap,
-             L"existing ring mapping is not ours (wrong magic/version)");
+             L"existing ring mapping is not ours (magic/version/geometry)");
       UnmapViewOfFile(view);
       CloseHandle(map);
       return false;

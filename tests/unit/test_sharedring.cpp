@@ -162,4 +162,78 @@ TEST(SharedRingOpen, FailsWhenNoMappingExists) {
   EXPECT_FALSE(SharedRingOpenRead(&reader));
 }
 
+namespace {
+
+// Pre-creates a mapping under the ring's own name with a caller-built
+// header and keeps it ALIVE: simulates a corrupted or hostile creator
+// (a same-user process can create the name first; its DACL then grants
+// this user write). Closing the handle first would destroy the object
+// and the adopter would legitimately create a fresh ring.
+struct ForeignRing {
+  HANDLE map = nullptr;
+  uint8_t* view = nullptr;
+};
+
+void PreCreateForeignHeader(const RingHeader& h, ForeignRing* out) {
+  const SIZE_T viewSize = sizeof(RingHeader) + kRingSizeBytes;
+  out->map = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
+                                0, static_cast<DWORD>(viewSize), kRingName);
+  ASSERT_NE(out->map, nullptr);
+  out->view = static_cast<uint8_t*>(
+      MapViewOfFile(out->map, FILE_MAP_ALL_ACCESS, 0, 0, 0));
+  ASSERT_NE(out->view, nullptr);
+  memcpy(out->view, &h, sizeof(h));
+}
+
+void ReleaseForeignRing(ForeignRing* fr) {
+  if (fr->view != nullptr) {
+    UnmapViewOfFile(fr->view);
+    fr->view = nullptr;
+  }
+  if (fr->map != nullptr) {
+    CloseHandle(fr->map);
+    fr->map = nullptr;
+  }
+}
+
+}  // namespace
+
+TEST(SharedRingAdopt, HostileRingSizeIsRefused) {
+  // A same-name mapping with the right magic/version but a ringSize no
+  // host of this build would create: adopting it would hand the hook a
+  // geometry it trusts (RingWriterInit only checks >= 56), making the
+  // hook write out of bounds inside explorer.exe. Must be refused.
+  RingHeader h = {};
+  h.magic = kRingMagic;
+  h.protoVersion = kProtoVersion;
+  h.headerSize = sizeof(RingHeader);
+  h.ringSize = 0xFFFFFFF0u;  // hostile geometry
+  ForeignRing fr = {};
+  ASSERT_NO_FATAL_FAILURE(PreCreateForeignHeader(h, &fr));
+
+  SharedRingHandle ring = {};
+  wchar_t err[256] = {};
+  EXPECT_FALSE(SharedRingCreate(&ring, 1, err, 256))
+      << "the adopter must refuse a hostile ringSize";
+
+  ReleaseForeignRing(&fr);
+}
+
+TEST(SharedRingAdopt, ForeignHeaderSizeIsRefused) {
+  RingHeader h = {};
+  h.magic = kRingMagic;
+  h.protoVersion = kProtoVersion;
+  h.headerSize = 8;  // no build of this protocol publishes this
+  h.ringSize = kRingSizeBytes;
+  ForeignRing fr = {};
+  ASSERT_NO_FATAL_FAILURE(PreCreateForeignHeader(h, &fr));
+
+  SharedRingHandle ring = {};
+  wchar_t err[256] = {};
+  EXPECT_FALSE(SharedRingCreate(&ring, 1, err, 256))
+      << "the adopter must refuse a foreign headerSize";
+
+  ReleaseForeignRing(&fr);
+}
+
 }  // namespace

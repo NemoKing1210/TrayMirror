@@ -22,8 +22,11 @@ struct SharedRingHandle {
 
 // Creates `Local\TrayMirror.Ring.v<version>` (size: header + ring) with
 // DACL S-1-5-18 (SYSTEM) + current user, and the auto-reset signal event
-// `Local\TrayMirror.Signal`. Returns false (with a message in errBuf)
-// when the mapping already exists — another live host owns it.
+// `Local\TrayMirror.Signal`. A mapping that already exists is ADOPTED
+// when it carries this build's magic/version/geometry (an orphaned ring
+// after a host crash, the hook still holding its view: keep positions,
+// refresh explorerPid — crash recovery); a foreign or hostile one is
+// refused. Single instance is the mutex's job (spec 7.4), not the name.
 bool SharedRingCreate(SharedRingHandle* out, DWORD explorerPid,
                       wchar_t* errBuf, size_t errCap);
 
