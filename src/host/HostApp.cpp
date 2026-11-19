@@ -1,5 +1,6 @@
 #include "HostApp.h"
 
+#include "BuildInfo.h"
 #include "HookInstall.h"
 #include "Log.h"
 #include "Proto.h"
@@ -289,6 +290,8 @@ bool HostAppParseArgs(const wchar_t* const* argv, int argc,
       out->diagnostic = true;
     } else if (a == L"--resync") {
       out->resync = true;
+    } else if (a == L"--version") {
+      out->version = true;
     } else if (a == L"--duration" && i + 1 < argc) {
       out->durationSec = ToInt(argv[++i]);
       if (out->durationSec <= 0) {
@@ -339,6 +342,16 @@ const char* NimName(uint32_t nim) {
 }  // namespace
 
 int HostAppRun(const HostAppConfig& config) {
+  // (0 pre) Build identity: answer before the single-instance gate and
+  // before any tray lookup, so the acceptance checklist can ask a binary
+  // what it is even while another host is resident.
+  if (config.version) {
+    const std::wstring line = traymirror::VersionLine();
+    std::fputws(line.c_str(), stdout);
+    std::fputws(L"\n", stdout);
+    return 0;
+  }
+
   // (0) Manual resync (spec 4.3): signal a running host and exit. This
   // runs before the single-instance acquire — the point is to reach the
   // instance that holds it.
@@ -382,6 +395,8 @@ int HostAppRun(const HostAppConfig& config) {
   }
 
   auto log = InitHostLogging(config.logLevel);
+  const std::wstring exePath = traymirror::ExecutablePath();
+  log->info("build {} exe {}", traymirror::BuildId(), Narrow(exePath.c_str()));
 
   // (2.5) The private stop events, created BEFORE anything is
   // installed: a null handle would otherwise make the reader spin on

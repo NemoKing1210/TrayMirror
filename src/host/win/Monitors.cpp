@@ -8,6 +8,7 @@
 #include <wrl/client.h>
 
 #include <bit>
+#include <algorithm>
 #include <cwchar>
 #include <vector>
 
@@ -83,10 +84,15 @@ bool UiaElementRect(HWND taskbar, const wchar_t* className, RECT* out) {
     return false;
   }
   ComPtr<IUIAutomation> uia;
-  if (FAILED(CoCreateInstance(__uuidof(CUIAutomation), nullptr,
+  if (FAILED(CoCreateInstance(__uuidof(CUIAutomation8), nullptr,
                               CLSCTX_INPROC_SERVER,
                               IID_PPV_ARGS(uia.GetAddressOf()))) != 0) {
     return false;
+  }
+  ComPtr<IUIAutomation2> bounded;
+  if (SUCCEEDED(uia.As(&bounded))) {
+    bounded->put_ConnectionTimeout(500);
+    bounded->put_TransactionTimeout(500);
   }
   ComPtr<IUIAutomationElement> window;
   if (FAILED(uia->ElementFromHandle(taskbar, window.GetAddressOf())) != 0 ||
@@ -124,6 +130,29 @@ bool UiaElementRect(HWND taskbar, const wchar_t* className, RECT* out) {
   return true;
 }
 
+struct TaskListBounds {
+  RECT row = {};
+  LONG right = 0;
+  bool found = false;
+};
+
+BOOL CALLBACK CollectTaskListBounds(HWND hwnd, LPARAM data) {
+  wchar_t name[64] = {};
+  GetClassNameW(hwnd, name, static_cast<int>(std::size(name)));
+  if (wcscmp(name, L"MSTaskListWClass") != 0 || IsWindowVisible(hwnd) == FALSE) {
+    return TRUE;
+  }
+  auto* bounds = ParamPtr<TaskListBounds>(data);
+  RECT rect = {};
+  if (GetWindowRect(hwnd, &rect) != FALSE && rect.right > rect.left &&
+      rect.bottom > bounds->row.top && rect.top < bounds->row.bottom &&
+      rect.right <= bounds->row.right && rect.left >= bounds->row.left) {
+    bounds->right = bounds->found ? (std::max)(bounds->right, rect.right) : rect.right;
+    bounds->found = true;
+  }
+  return TRUE;
+}
+
 }  // namespace
 
 std::vector<MonitorTaskbar> DefaultEnumerateSecondaryMonitors() {
@@ -134,6 +163,21 @@ std::vector<MonitorTaskbar> DefaultEnumerateSecondaryMonitors() {
   std::vector<HWND> taskbars;
   EnumWindows(CollectTaskbar, reinterpret_cast<LPARAM>(&taskbars));
 
+  TrayMetrics trayMetrics;
+  const HWND primary = FindWindowW(L"Shell_TrayWnd", nullptr);
+  RECT button = {};
+  if (primary != nullptr &&
+      UiaElementRect(primary, L"SystemTray.NotifyIconView", &button)) {
+    const UINT dpi = GetDpiForWindow(primary);
+    trayMetrics = {.buttonWidth = button.right - button.left,
+                   .buttonHeight = button.bottom - button.top,
+                   .referenceDpi = dpi == 0 ? 96 : dpi};
+    log->info("native tray button {}x{} at {} DPI", trayMetrics.buttonWidth,
+              trayMetrics.buttonHeight, trayMetrics.referenceDpi);
+  } else {
+    log->warn("native tray button bounds unavailable; using scalable fallback");
+  }
+
   std::vector<MonitorTaskbar> result;
   for (const MonitorEntry& entry : monitors) {
     MONITORINFO mi = {};
@@ -143,6 +187,7 @@ std::vector<MonitorTaskbar> DefaultEnumerateSecondaryMonitors() {
       continue;
     }
     MonitorTaskbar mt;
+    mt.trayMetrics = trayMetrics;
     mt.monitor = entry.monitor;
     mt.monitorRect = mi.rcMonitor;
     for (const HWND taskbar : taskbars) {
@@ -150,11 +195,15 @@ std::vector<MonitorTaskbar> DefaultEnumerateSecondaryMonitors() {
           entry.monitor) {
         continue;
       }
+      if (IsWindowVisible(taskbar) == FALSE) {
+        break;
+      }
       RECT taskbarRect = {};
       if (GetWindowRect(taskbar, &taskbarRect) == FALSE) {
         continue;
       }
       mt.hasTaskbar = true;
+      mt.taskbarWindow = taskbar;
       mt.taskbarRect = taskbarRect;
       if (UiaElementRect(taskbar, L"SystemTray.OmniButton", &mt.clockRect)) {
         log->info("monitor ({},{}): taskbar clock at ({},{})", entry.rect.left,
@@ -173,10 +222,20 @@ std::vector<MonitorTaskbar> DefaultEnumerateSecondaryMonitors() {
                   entry.rect.left, entry.rect.top, reserve);
       }
       RECT taskList = {};
+      TaskListBounds native{.row = taskbarRect};
+      EnumChildWindows(taskbar, CollectTaskListBounds, reinterpret_cast<LPARAM>(&native));
+      mt.hasTaskListBounds = native.found;
+      mt.taskListRight = native.right;
       if (UiaElementRect(taskbar, L"MSTaskListWClass", &taskList)) {
-        mt.taskListRight = taskList.right;
+        if (taskList.left >= taskbarRect.left && taskList.right <= taskbarRect.right) {
+          mt.taskListRight = native.found ? (std::max)(native.right, taskList.right) : taskList.right;
+          mt.hasTaskListBounds = true;
+        }
         log->info("monitor ({},{}): task list ends at x={}", entry.rect.left,
                   entry.rect.top, mt.taskListRight);
+      }
+      if (!mt.hasTaskListBounds) {
+        log->warn("task list bounds unavailable; retaining any existing safe strip");
       }
       break;
     }
@@ -186,7 +245,7 @@ std::vector<MonitorTaskbar> DefaultEnumerateSecondaryMonitors() {
 }
 
 RECT ComputeOverlayStripRect(const MonitorTaskbar& mt, int widthPx) {
-  if (!mt.hasTaskbar || widthPx <= 0) {
+  if (!mt.hasTaskbar || !mt.hasTaskListBounds || widthPx <= 0) {
     return RECT{};
   }
   RECT strip = {};
@@ -200,7 +259,7 @@ RECT ComputeOverlayStripRect(const MonitorTaskbar& mt, int widthPx) {
   LONG left = right - widthPx;
   // The overlay is topmost: anything under it cannot be clicked. Stop at
   // the task list's right edge when it could be measured.
-  if (mt.taskListRight > 0 && left < mt.taskListRight) {
+  if (left < mt.taskListRight) {
     left = mt.taskListRight;
   }
   if (left < mt.monitorRect.left) {
@@ -215,6 +274,15 @@ RECT ComputeOverlayStripRect(const MonitorTaskbar& mt, int widthPx) {
 }
 
 int IconPxForDpi(UINT dpi) {
+  // The notification area draws system small icons, so the size is the
+  // system metric at that DPI, not a table: it follows the user's
+  // display settings (spec 6.3). The table below is only a fallback for
+  // a DPI the metric cannot answer.
+  const UINT effective = dpi == 0 ? 96 : dpi;
+  const int metric = GetSystemMetricsForDpi(SM_CXSMICON, effective);
+  if (metric > 0) {
+    return metric;
+  }
   if (dpi >= 192) {
     return 32;
   }
@@ -227,8 +295,26 @@ int IconPxForDpi(UINT dpi) {
   return 16;
 }
 
-int IconGapPxForDpi(UINT dpi) {
-  return MulDiv(2, static_cast<int>(dpi), 96);
+SIZE TrayButtonSizeForDpi(UINT dpi, const TrayMetrics& metrics) {
+  const UINT target = dpi == 0 ? 96 : dpi;
+  TrayMetrics valid = metrics;
+  if (valid.referenceDpi < 48 || valid.referenceDpi > 960 ||
+      valid.buttonWidth < MulDiv(16, static_cast<int>(valid.referenceDpi), 96) ||
+      valid.buttonWidth > MulDiv(128, static_cast<int>(valid.referenceDpi), 96) ||
+      valid.buttonHeight < MulDiv(16, static_cast<int>(valid.referenceDpi), 96) ||
+      valid.buttonHeight > MulDiv(128, static_cast<int>(valid.referenceDpi), 96)) {
+    valid = {};
+  }
+  const int icon = IconPxForDpi(target);
+  return SIZE{.cx = (std::max)(icon, MulDiv(valid.buttonWidth, static_cast<int>(target),
+                                   static_cast<int>(valid.referenceDpi))),
+              .cy = (std::max)(icon, MulDiv(valid.buttonHeight, static_cast<int>(target),
+                                   static_cast<int>(valid.referenceDpi)))};
+}
+
+bool ShouldExposeTray(const RECT& monitor, const RECT& foreground, bool shellDesktop) {
+  return shellDesktop || foreground.left > monitor.left || foreground.top > monitor.top ||
+         foreground.right < monitor.right || foreground.bottom < monitor.bottom;
 }
 
 }  // namespace traymirror

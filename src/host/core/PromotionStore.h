@@ -21,12 +21,15 @@ struct TrayIcon;
 struct NotifyIconSetting {
   std::wstring exePath;  // ExecutablePath
   UINT uid = 0;          // UID
-  bool isPromoted = true;  // IsPromoted; a missing value keeps the icon
+  bool isPromoted = false;  // missing IsPromoted is the shell's default overflow
+  GUID guid = {};
+  bool hasGuid = false;
+  bool hasUid = true;
+  UINT order = UINT_MAX;
 };
 
-// Reads every subkey of an opened NotifyIconSettings key. Values the
-// system left out fall back to "promoted", so an icon cannot vanish
-// because of a half-written entry.
+// Reads shell identity, visibility and validated UIOrderList placement.
+// Missing promotion values remain accessible in the overflow panel.
 std::vector<NotifyIconSetting> ReadNotifyIconSettings(HKEY settings);
 
 // Opens HKCU\Control Panel\NotifyIconSettings for reading. Returns
@@ -34,9 +37,8 @@ std::vector<NotifyIconSetting> ReadNotifyIconSettings(HKEY settings);
 HKEY OpenLiveNotifyIconSettings();
 
 // The registry entry that belongs to `icon`: the executable path is
-// compared case-insensitively and the uID exactly. An icon registered
-// with NIF_GUID has no uID identity of its own, so its entry is matched
-// by path only.
+// canonicalized and compared case-insensitively, with an exact uID.
+// GUID registrations match by IconGuid, never just by executable path.
 bool MatchesIcon(const NotifyIconSetting& setting, const TrayIcon& icon);
 
 // Applies the whole store to the model. Returns true iff the visible

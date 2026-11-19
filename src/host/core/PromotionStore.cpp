@@ -2,6 +2,11 @@
 
 #include "core/TrayModel.h"
 
+#include <shlobj.h>
+#include <algorithm>
+#include <cstring>
+#include <memory>
+
 namespace traymirror {
 namespace {
 
@@ -15,13 +20,15 @@ std::wstring ReadString(HKEY key, const wchar_t* name) {
   DWORD bytes = 0;
   if (RegQueryValueExW(key, name, nullptr, &type, nullptr, &bytes) !=
           ERROR_SUCCESS ||
-      (type != REG_SZ && type != REG_EXPAND_SZ) || bytes < sizeof(wchar_t)) {
+      (type != REG_SZ && type != REG_EXPAND_SZ) || bytes < sizeof(wchar_t) ||
+      bytes % sizeof(wchar_t) != 0 || bytes > 32768 * sizeof(wchar_t)) {
     return {};
   }
-  std::wstring value(bytes / sizeof(wchar_t), L'\0');
+  std::wstring value((bytes / sizeof(wchar_t)) + 1, L'\0');
   if (RegQueryValueExW(key, name, nullptr, &type,
                        reinterpret_cast<BYTE*>(value.data()), &bytes) !=
-      ERROR_SUCCESS) {
+      ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ) ||
+      bytes % sizeof(wchar_t) != 0) {
     return {};
   }
   value.resize(wcslen(value.c_str()));  // the value is NUL-terminated
@@ -34,12 +41,60 @@ bool ReadDword(HKEY key, const wchar_t* name, DWORD* out) {
   return RegQueryValueExW(key, name, nullptr, &type,
                           reinterpret_cast<BYTE*>(out), &bytes) ==
              ERROR_SUCCESS &&
-         type == REG_DWORD;
+         type == REG_DWORD && bytes == sizeof(DWORD);
 }
 
 bool SamePath(const std::wstring& a, const std::wstring& b) {
   return CompareStringOrdinal(a.c_str(), static_cast<int>(a.size()), b.c_str(),
                               static_cast<int>(b.size()), TRUE) == CSTR_EQUAL;
+}
+
+std::wstring CanonicalPath(const std::wstring& path) {
+  const DWORD required = ExpandEnvironmentStringsW(path.c_str(), nullptr, 0);
+  if (required == 0 || required > 32768) {
+    return path;
+  }
+  std::wstring expanded(required, L'\0');
+  if (ExpandEnvironmentStringsW(path.c_str(), expanded.data(), required) == 0) {
+    return path;
+  }
+  expanded.resize(wcslen(expanded.c_str()));
+  if (expanded.size() > 38 && expanded[0] == L'{' && expanded[38] == L'\\') {
+    GUID folder = {};
+    if (SUCCEEDED(CLSIDFromString(expanded.substr(0, 38).c_str(), &folder))) {
+      PWSTR raw = nullptr;
+      if (SUCCEEDED(SHGetKnownFolderPath(folder, KF_FLAG_DONT_VERIFY, nullptr, &raw))) {
+        const std::unique_ptr<wchar_t, decltype(&CoTaskMemFree)> owned(raw, CoTaskMemFree);
+        expanded = std::wstring(owned.get()) + expanded.substr(38);
+      }
+    }
+  }
+  if (expanded.starts_with(L"\\\\?\\")) {
+    expanded.erase(0, 4);
+  }
+  std::ranges::replace(expanded, L'/', L'\\');
+  return expanded;
+}
+
+std::vector<std::wstring> ReadOrder(HKEY key) {
+  DWORD type = 0;
+  DWORD bytes = 0;
+  if (RegQueryValueExW(key, L"UIOrderList", nullptr, &type, nullptr, &bytes) != ERROR_SUCCESS ||
+      type != REG_BINARY || bytes == 0 || bytes > 1024 * 1024 || bytes % sizeof(uint64_t) != 0) {
+    return {};
+  }
+  std::vector<BYTE> data(bytes);
+  if (RegQueryValueExW(key, L"UIOrderList", nullptr, &type, data.data(), &bytes) != ERROR_SUCCESS ||
+      type != REG_BINARY || bytes % sizeof(uint64_t) != 0) {
+    return {};
+  }
+  std::vector<std::wstring> order;
+  for (size_t offset = 0; offset < bytes; offset += sizeof(uint64_t)) {
+    uint64_t id = 0;
+    std::memcpy(&id, data.data() + offset, sizeof(id));
+    order.push_back(std::to_wstring(id));
+  }
+  return order;
 }
 
 }  // namespace
@@ -49,6 +104,7 @@ std::vector<NotifyIconSetting> ReadNotifyIconSettings(HKEY settings) {
   if (settings == nullptr) {
     return out;
   }
+  const auto order = ReadOrder(settings);
   for (DWORD index = 0;; ++index) {
     wchar_t name[256] = {};
     auto length = static_cast<DWORD>(std::size(name));
@@ -66,17 +122,24 @@ std::vector<NotifyIconSetting> ReadNotifyIconSettings(HKEY settings) {
       continue;
     }
     NotifyIconSetting setting;
-    setting.exePath = ReadString(entry, kValueExePath);
+    setting.exePath = CanonicalPath(ReadString(entry, kValueExePath));
     DWORD uid = 0;
-    setting.uid = ReadDword(entry, kValueUid, &uid) ? uid : 0;
-    DWORD promoted = 1;
-    setting.isPromoted =
-        !ReadDword(entry, kValuePromoted, &promoted) || promoted != 0;
+    setting.hasUid = ReadDword(entry, kValueUid, &uid);
+    setting.uid = uid;
+    DWORD promoted = 0;
+    setting.isPromoted = ReadDword(entry, kValuePromoted, &promoted) && promoted != 0;
+    const auto guid = ReadString(entry, L"IconGuid");
+    setting.hasGuid = !guid.empty() && SUCCEEDED(CLSIDFromString(guid.c_str(), &setting.guid));
+    const auto position = std::ranges::find(order, name);
+    if (position != order.end()) {
+      setting.order = static_cast<UINT>(position - order.begin());
+    }
     RegCloseKey(entry);
     if (!setting.exePath.empty()) {
       out.push_back(std::move(setting));
     }
   }
+  std::ranges::stable_sort(out, {}, &NotifyIconSetting::order);
   return out;
 }
 
@@ -90,19 +153,17 @@ HKEY OpenLiveNotifyIconSettings() {
 }
 
 bool MatchesIcon(const NotifyIconSetting& setting, const TrayIcon& icon) {
+  if (setting.hasGuid || icon.key.kind == IconKey::Kind::kGuid) {
+    return setting.hasGuid && icon.key.kind == IconKey::Kind::kGuid &&
+           IsEqualGUID(setting.guid, icon.key.guid) != FALSE;
+  }
   if (icon.exePath.empty() || setting.exePath.empty()) {
     return false;
   }
-  if (!SamePath(setting.exePath, icon.exePath)) {
+  if (!SamePath(CanonicalPath(setting.exePath), CanonicalPath(icon.exePath))) {
     return false;
   }
-  // A GUID-keyed icon has no uID identity of its own: other instances of
-  // the same executable pick their entries by uID, and a GUID icon would
-  // otherwise swallow the first one.
-  if (icon.key.kind == IconKey::Kind::kGuid) {
-    return true;
-  }
-  return setting.uid == icon.key.uid;
+  return setting.hasUid && setting.uid == icon.key.uid;
 }
 
 bool ApplyPromotion(TrayModel* model,
@@ -112,16 +173,38 @@ bool ApplyPromotion(TrayModel* model,
   }
   bool changed = false;
   for (const TrayIcon& icon : model->icons()) {
-    bool promoted = true;  // an icon with no entry stays on the strip
+    bool promoted = false;  // unknown icons remain reachable in overflow
+    UINT order = UINT_MAX;
+    const NotifyIconSetting* selected = nullptr;
     for (const NotifyIconSetting& setting : settings) {
       if (MatchesIcon(setting, icon)) {
-        promoted = setting.isPromoted;
-        break;
+        // Duplicate registrations can match one live icon. The entry the
+        // shell places in UIOrderList is the current one; the earliest
+        // position wins, and an unplaced entry never outranks a placed
+        // one. Without any placement the first enumerated entry wins,
+        // which keeps repeated reads deterministic.
+        const auto better = [](const NotifyIconSetting& candidate,
+                               const NotifyIconSetting& current) {
+          const bool candidatePlaced = candidate.order != UINT_MAX;
+          const bool currentPlaced = current.order != UINT_MAX;
+          if (candidatePlaced != currentPlaced) {
+            return candidatePlaced;
+          }
+          return candidatePlaced && candidate.order < current.order;
+        };
+        if (selected == nullptr || better(setting, *selected)) {
+          selected = &setting;
+        }
       }
+    }
+    if (selected != nullptr) {
+      promoted = selected->isPromoted;
+      order = selected->order;
     }
     if (model->SetPromotion(icon.key, promoted)) {
       changed = true;
     }
+    changed = model->SetShellOrder(icon.key, order) || changed;
   }
   return changed;
 }
@@ -180,7 +263,7 @@ void PromotionWatcher::Run() {
   SetEvent(ready_);
   while (key != nullptr) {
     ResetEvent(changed_);
-    if (RegNotifyChangeKeyValue(key, TRUE, REG_NOTIFY_CHANGE_LAST_SET, changed_,
+    if (RegNotifyChangeKeyValue(key, TRUE, REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_NAME, changed_,
                                 TRUE) != ERROR_SUCCESS) {
       break;  // the key vanished: stop watching, keep the last state
     }
@@ -193,7 +276,7 @@ void PromotionWatcher::Run() {
     bool armed = true;
     for (;;) {
       ResetEvent(changed_);
-      if (RegNotifyChangeKeyValue(key, TRUE, REG_NOTIFY_CHANGE_LAST_SET,
+      if (RegNotifyChangeKeyValue(key, TRUE, REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_NAME,
                                   changed_, TRUE) != ERROR_SUCCESS) {
         armed = false;  // the key vanished mid-burst
         break;

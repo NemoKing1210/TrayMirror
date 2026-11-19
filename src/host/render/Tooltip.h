@@ -1,29 +1,18 @@
-// Tooltip for one overlay strip (spec 6.4, report 09): our own layered
-// window with the measured Win11 geometry — rounded corners, 10 px
-// horizontal padding, a 9 px gap above the icon, theme colours. Drawn
-// with Direct2D into a DIB and handed to the window as a premultiplied
-// layer, so the corners are anti-aliased against whatever is behind it.
+// The measured Win11 tray tooltip (spec 6.4, report 09): a topmost
+// no-activate window that paints the solid measured surface. Text is
+// drawn with GDI and the system status font because that is what the
+// native tooltip uses, so the measured padding/advance values and the
+// font-linking behaviour are reproduced exactly instead of through a
+// second shaping stack.
 #pragma once
 
 #include <windows.h>
-
-#include <d2d1.h>
-#include <dwrite.h>
-#include <wrl/client.h>
 
 #include <functional>
 #include <memory>
 #include <string>
 
 namespace traymirror {
-
-// The theme half of the appearance, in the units the measurement used.
-// Values are the cells recorded in docs/visual-spec.md.
-struct TooltipPalette {
-  COLORREF background = 0;
-  COLORREF text = 0;
-  [[nodiscard]] static TooltipPalette For(bool dark);
-};
 
 class Tooltip {
  public:
@@ -48,22 +37,22 @@ class Tooltip {
   static bool EnsureClass();
   static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wparam,
                                   LPARAM lparam);
-  bool InitFactories();
-  bool Measure(const std::wstring& text, int dpi, int* width, int* height);
-  // Draws the box and the text and hands the pixels to the layered
-  // window at `destination` (screen coordinates).
-  bool Paint(const std::wstring& text, int width, int height, int dpi,
-             POINT destination);
+  // Selects the status font, wraps the text to the measured width and
+  // returns the box size in pixels.
+  bool Measure(const std::wstring& text, int dpi, int maxWidth, int maxHeight,
+               int* width, int* height);
+  void Paint(HDC dc);
   [[nodiscard]] bool UsesDarkTheme() const;
 
   HWND owner_ = nullptr;
   HWND hwnd_ = nullptr;
   ThemeProbe dark_;
   bool visible_ = false;
-  Microsoft::WRL::ComPtr<ID2D1Factory> d2d_;
-  Microsoft::WRL::ComPtr<IDWriteFactory> dwrite_;
-  Microsoft::WRL::ComPtr<IDWriteTextFormat> format_;
-  Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> target_;
+  int dpi_ = 96;
+  RECT anchor_ = {};
+  HFONT font_ = nullptr;
+  std::wstring text_;
+  std::wstring wrapped_;
 };
 
 }  // namespace traymirror

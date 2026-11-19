@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -51,12 +52,20 @@ class OverlayThread {
  private:
   void Run();
   void BuildOverlays();
+  void BuildOverlaysFrom(const std::vector<MonitorTaskbar>& snapshot);
+  // Signals the geometry worker (or rebuilds inline when there is none).
+  void RequestGeometry();
+  // Consumes the latest published snapshot on the UI thread.
+  void ApplyGeometrySnapshot();
+  // The worker: the only place the enumerator (UIA) ever runs after the
+  // startup build, so a slow shell query cannot stall input or render.
+  void GeometryLoop();
   void ApplyInbox();
   // Re-reads the registry promotion store and applies it to the model.
   // Returns true when an icon moved between the strip and the overflow.
   bool ApplyPromotionFromStore();
   void PushModelToOverlays();
-  [[nodiscard]] size_t CountVisibleIcons() const;
+  [[nodiscard]] size_t CountStripSlots() const;
   void PostGesture(const DispatchCall& call);
 
   static bool EnsureUiClass();
@@ -74,6 +83,14 @@ class OverlayThread {
   MonitorEnumerator enumerate_;
   DispatchSender sender_;
   PromotionWatcher::KeyOpener promotion_;
+  // Geometry worker (see GeometryLoop). The mutex guards only the
+  // snapshot hand-off; the UI thread never waits on the enumerator.
+  HANDLE geometryWake_ = nullptr;
+  HANDLE geometryStop_ = nullptr;
+  std::thread geometryThread_;
+  std::mutex geometryMutex_;
+  std::vector<MonitorTaskbar> geometrySnapshot_;
+  std::atomic<bool> geometryPending_{false};
   // Created on the UI thread once the sender is known; destroyed with it.
   std::unique_ptr<Dispatcher> dispatcher_;
   // Registry promotion (spec 4.5): event-driven, no polling. A null
@@ -87,10 +104,13 @@ class OverlayThread {
   // icon needs its registry entry read, a modify does not.
   size_t promotionIconCount_ = 0;
   std::vector<std::unique_ptr<Overlay>> overlays_;
-  // How many icon slots the current strips were built for, and whether
-  // the taskbar had no room for that many (then growth cannot help).
+  // How many slots the strips were built for, and whether every monitor
+  // ran out of room (only then can growth no longer help).
   size_t builtSlots_ = 0;
   bool stripRoomExhausted_ = false;
+  HWINEVENTHOOK geometryHook_ = nullptr;
+  HWINEVENTHOOK foregroundHook_ = nullptr;
+  HWINEVENTHOOK visibilityHook_ = nullptr;
 };
 
 }  // namespace traymirror

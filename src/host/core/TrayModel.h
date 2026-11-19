@@ -51,8 +51,9 @@ struct TrayIcon {
   UINT version = 0;     // 0 or 4 (NIM_SETVERSION)
   std::wstring exePath;
   // Stage 3 (spec 4.5): registry promotion decides strip versus overflow;
-  // an icon with no matching registry entry stays promoted.
+  // unmatched icons remain reachable through the overflow panel.
   bool promoted = true;
+  UINT shellOrder = UINT_MAX;
   // Tick of the last applied message (diagnostics and promotion matching).
   ULONGLONG lastSeen = 0;
 
@@ -94,6 +95,7 @@ class TrayModel {
   // Returns true iff the visible model changed (the icon moved between
   // the strip and the overflow).
   bool SetPromotion(const IconKey& key, bool promoted);
+  bool SetShellOrder(const IconKey& key, UINT order);
 
   // Dead owners (spec 4.4): drops every icon of `owner` and the cached
   // identity of the window. Returns true iff the visible set changed.

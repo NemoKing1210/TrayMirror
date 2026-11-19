@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/branding/traymirror-icon.png" width="128" height="128" alt="TrayMirror: two monitors with mirrored notification icons">
+</p>
+
 # TrayMirror
 
 **Native system tray on every monitor in Windows 11.**
@@ -6,13 +10,15 @@ TrayMirror mirrors the notification area (tray) from the primary taskbar onto
 secondary monitors, aiming to be indistinguishable from the original: icons,
 tooltips, clicks, context menus and balloons.
 
-> **Project status: stage 1 (skeleton) — code complete, acceptance runs
-> pending.**
-> Spikes S1–S3 returned **GO** (stage 0 closed). Stage 1 built the
-> versioned ring protocol, the production hook DLL, the host process
-> with selftest, the dump tool, CI and a deterministic parser fuzz
-> corpus — ctest 6/6 green. The 100× live start/stop acceptance and the
-> first GitHub push are next. See the [roadmap](#roadmap).
+The application icon is embedded in `TrayMirror.exe` for Windows Explorer and
+shortcuts. Branding assets: [Windows icon](assets/branding/traymirror-icon.ico),
+[transparent PNG](assets/branding/traymirror-icon.png),
+and [asset notes](assets/branding/README.md).
+
+> **Project status: stage 3 in progress.** The hook, model, initial sync,
+> secondary-monitor overlays and callback dispatch are implemented.
+> Rendering now adapts to system tray geometry, monitor DPI and Windows
+> appearance settings. Cross-version visual acceptance remains in progress.
 
 ---
 
@@ -46,6 +52,35 @@ Design rules that constrain every change:
 - only public, documented mechanisms are used (no injection, no patching);
 - the Hook ↔ Host protocol is versioned;
 - any abnormal condition degrades to safe mode instead of hanging Explorer.
+
+The overlay leaves the existing taskbar material visible through a transparent
+DirectComposition window. Button dimensions come from the primary tray's UI
+Automation bounds when available and scale independently for each monitor.
+Window sizing, drawing and hit testing share those dimensions. The strip fits
+its contents next to the clock; icons that cannot fit remain accessible through
+the leftmost overflow button.
+
+The overflow popup uses the acrylic material measured on Windows 11
+(`SetWindowCompositionAttribute` with a DirectComposition content surface),
+DWM-owned rounded corners and a whole-window fade; transparency, high contrast
+and disabled animations each select an explicit fallback. The tooltip paints
+the measured solid surface (`#292D32`/`#F7F7F7` dark, `#F9F9F9`/`#1A1A1A`
+light) with the system status font, and the hover highlight uses the full
+native button as its hit region with a separate visual inset. These
+measurements come from one build and machine; cross-version visual acceptance
+is still open, and the implemented popup motion is provisional because the
+native timing was not measured.
+
+For a hook-free visual check after building, run:
+
+```powershell
+$env:TRAYMIRROR_VISUAL_REVIEW = '1'
+.\build\tests\integration\traymirror_integration.exe --gtest_filter=VisualRender.SystemIconsProduceVisiblePixels
+Remove-Item Env:\TRAYMIRROR_VISUAL_REVIEW
+```
+
+This shows synthetic system icons and a tooltip for 45 seconds. It does not
+install a hook or read the live tray model.
 
 ## Repository layout
 
@@ -172,10 +207,10 @@ buffer; the stage 1 protocol removes that blocking write from the tray thread.
 
 | Stage | Scope | Status |
 |---|---|---|
-| 0 | Research spikes S1–S9, feasibility decision | done — S1–S3 GO, verdict GO (S4–S9 folded into later stages) |
-| 1 | Skeleton: protocol, hook, host, CI, logging | code complete — 100× acceptance runs pending (owner) |
-| 2 | Icon model, first overlay rendering | planned |
-| 3 | Native behavior: v4 protocol, menus, balloons, overflow | planned |
+| 0 | Research spikes S1–S9, feasibility decision | done — S1–S3 GO, verdict GO |
+| 1 | Skeleton: protocol, hook, host, CI, logging | done — acceptance GO (ADR-0004) |
+| 2 | Icon model, first overlay rendering | done — acceptance PASS (ADR-0005) |
+| 3 | Native behavior: v4 protocol, menus, balloons, overflow | in progress — repair implemented and automated tests green; owner live visual pass open (ADR-0007) |
 | 4 | Reliability: Explorer restarts, sleep, RDP, monitors, stress | planned |
 | 5 | Settings, drag-and-drop, per-app rules | planned |
 | 6 | Optimization, security, signing, installer, release | planned |

@@ -51,6 +51,11 @@ HKEY NoPromotionStore() { return nullptr; }
 HWND g_tooltipFound = nullptr;
 
 BOOL CALLBACK FindTooltipProc(HWND hwnd, LPARAM /*unused*/) {
+  DWORD pid = 0;
+  GetWindowThreadProcessId(hwnd, &pid);
+  if (pid != GetCurrentProcessId()) {
+    return TRUE;
+  }
   wchar_t cls[64] = {};
   if (GetClassNameW(hwnd, cls, static_cast<int>(std::size(cls))) == 0 ||
       wcscmp(cls, L"TrayMirrorTooltip") != 0) {
@@ -84,6 +89,8 @@ MonitorTaskbar SyntheticTaskbar() {
   mt.clockRect = {mt.taskbarRect.right - 73, mt.taskbarRect.top,
                   mt.taskbarRect.right, mt.taskbarRect.bottom};
   mt.hasTaskbar = true;
+  mt.hasTaskListBounds = true;
+  mt.taskListRight = mi.rcMonitor.left;
   return mt;
 }
 
@@ -186,6 +193,11 @@ IconView FirstIcon(DispatchTarget target) {
 
 // The widest live TrayMirrorOverlay window, 0 when none exists.
 BOOL CALLBACK OverlayWidthProc(HWND hwnd, LPARAM data) {
+  DWORD pid = 0;
+  GetWindowThreadProcessId(hwnd, &pid);
+  if (pid != GetCurrentProcessId()) {
+    return TRUE;
+  }
   wchar_t cls[64] = {};
   if (GetClassNameW(hwnd, cls, static_cast<int>(std::size(cls))) == 0 ||
       wcscmp(cls, L"TrayMirrorOverlay") != 0) {
@@ -248,6 +260,11 @@ HWND FirstOverlayWindow() {
   HWND found = nullptr;
   EnumWindows(
       [](HWND hwnd, LPARAM data) -> BOOL {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(hwnd, &pid);
+        if (pid != GetCurrentProcessId()) {
+          return TRUE;
+        }
         wchar_t cls[64] = {};
         if (GetClassNameW(hwnd, cls, static_cast<int>(std::size(cls))) != 0 &&
             wcscmp(cls, L"TrayMirrorOverlay") == 0) {
@@ -271,6 +288,34 @@ TEST(OverlaySmoke, CreatesAndDestroysStrip) {
   overlay->SetIcons({});
   overlay->Render();
   overlay.reset();  // destruction must not hang or crash
+}
+
+TEST(OverlaySmoke, UsesTheArrowCursorInsteadOfTheLaunchBusyCursor) {
+  const MonitorTaskbar mt = SyntheticTaskbar();
+  auto overlay = Overlay::Create(mt.monitor, ComputeOverlayStripRect(mt, 160));
+  ASSERT_NE(overlay, nullptr);
+  EXPECT_EQ(reinterpret_cast<HCURSOR>(GetClassLongPtrW(overlay->hwnd(), GCLP_HCURSOR)),
+            LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)));
+}
+
+TEST(OverlaySmoke, RaisingTheTaskbarCannotCoverTheMirror) {
+  std::unique_ptr<HWND__, decltype(&DestroyWindow)> taskbar(
+      CreateWindowExW(WS_EX_TOPMOST, L"STATIC", L"Synthetic taskbar",
+                       WS_POPUP | WS_VISIBLE, 100, 100, 160, 48,
+                       nullptr, nullptr, GetModuleHandleW(nullptr), nullptr), DestroyWindow);
+  ASSERT_NE(taskbar, nullptr);
+  const RECT strip{100, 100, 260, 148};
+  auto overlay = Overlay::Create(MonitorFromWindow(taskbar.get(), MONITOR_DEFAULTTONEAREST),
+                                  strip, {}, {}, {}, taskbar.get());
+  ASSERT_NE(overlay, nullptr);
+  overlay->SetIcons({FirstIcon({})});
+  overlay->Render();
+  EXPECT_EQ(GetWindow(overlay->hwnd(), GW_OWNER), taskbar.get());
+  SetWindowPos(taskbar.get(), HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+  EXPECT_EQ(WindowFromPoint(POINT{104, 124}), overlay->hwnd());
+  SendMessageW(overlay->hwnd(), WM_ACTIVATE, WA_INACTIVE, 0);
+  EXPECT_NE(IsWindowVisible(overlay->hwnd()), FALSE);
 }
 
 TEST(OverlaySmoke, StripMatchesGeometry) {
@@ -324,6 +369,9 @@ TEST(OverlaySmoke, TooltipShowsAndHides) {
   const POINT inside = {4, height / 2};
   SendMessageW(overlay->hwnd(), WM_MOUSEMOVE, 0,
                MAKELPARAM(inside.x, inside.y));
+  EXPECT_EQ(FindTooltip(), nullptr) << "wait for the system hover event";
+  SendMessageW(overlay->hwnd(), WM_MOUSEHOVER, 0,
+               MAKELPARAM(inside.x, inside.y));
 
   // The tooltip is our own layered window (spec 6.4, report 09), not the
   // system tooltips_class32 one it used to be, so its text is the window
@@ -353,6 +401,92 @@ TEST(OverlaySmoke, UiWindowExistsWhileRunning) {  auto enumerate = []() {
 
   thread.Stop();
   EXPECT_EQ(IsWindow(ui), FALSE);
+}
+
+TEST(OverlayStrip, ReservationFitsTwelveFullButtons) {
+  ModelInbox inbox;
+  TrayModel model;
+  for (uint32_t uid = 1; uid <= 12; ++uid) {
+    model.Apply(MakeAdd(uid, L"reserved"));
+  }
+  OverlayThread thread;
+  ASSERT_TRUE(thread.Start(&inbox, &model, []() {
+    return std::vector<MonitorTaskbar>{SyntheticTaskbar()};
+  }, {}, NoPromotionStore));
+  HWND overlay = FirstOverlayWindow();
+  ASSERT_NE(overlay, nullptr);
+  const UINT dpi = GetDpiForWindow(overlay);
+  EXPECT_EQ(OverlayWidth(), MulDiv(384, static_cast<int>(dpi), 96));
+  thread.Stop();
+}
+
+TEST(OverlayStrip, SingleIconSitsNextToTheClockWithoutEmptyReservedSlots) {
+  ModelInbox inbox;
+  TrayModel model;
+  model.Apply(MakeAdd(1, L"one"));
+  OverlayThread thread;
+  ASSERT_TRUE(thread.Start(&inbox, &model, []() {
+    return std::vector<MonitorTaskbar>{SyntheticTaskbar()};
+  }, {}, NoPromotionStore));
+  const HWND overlay = FirstOverlayWindow();
+  ASSERT_NE(overlay, nullptr);
+  EXPECT_EQ(OverlayWidth(), MulDiv(32, static_cast<int>(GetDpiForWindow(overlay)), 96));
+  thread.Stop();
+}
+
+TEST(OverlayStrip, NarrowMonitorDoesNotPreventAnotherMonitorFromGrowing) {
+  ModelInbox inbox;
+  TrayModel model;
+  for (uint32_t uid = 1; uid <= 4; ++uid) {
+    model.Apply(MakeAdd(uid, L"initial"));
+  }
+  OverlayThread thread;
+  ASSERT_TRUE(thread.Start(&inbox, &model, []() {
+    MonitorTaskbar narrow = SyntheticTaskbar();
+    narrow.taskListRight = narrow.clockRect.left - 64;
+    return std::vector<MonitorTaskbar>{narrow, SyntheticTaskbar()};
+  }, {}, NoPromotionStore));
+  const int before = OverlayWidth();
+  inbox.Push(MakeAdd(5, L"added"));
+  int after = before;
+  for (int elapsed = 0; elapsed < 1000 && after <= before; elapsed += 10) {
+    Sleep(10);
+    after = OverlayWidth();
+  }
+  EXPECT_GT(after, before);
+  thread.Stop();
+}
+
+// UIA over the taskbar can take hundreds of milliseconds. A geometry
+// refresh must not run on the UI thread: while it does, the strip cannot
+// render, hover, or dispatch a click. The provider here sleeps longer
+// than the probe timeout, so a synchronous refresh fails the probe.
+TEST(OverlayStrip, DelayedGeometryProviderDoesNotBlockTheUiThread) {
+  static std::atomic<int> calls{0};
+  calls = 0;
+  auto enumerate = []() {
+    ++calls;
+    Sleep(300);
+    return std::vector<MonitorTaskbar>{SyntheticTaskbar()};
+  };
+  ModelInbox inbox;
+  TrayModel model;
+  OverlayThread thread;
+  ASSERT_TRUE(thread.Start(&inbox, &model, enumerate, {}, NoPromotionStore));
+  const HWND ui = thread.uiHwnd();
+  ASSERT_NE(ui, nullptr);
+  ASSERT_EQ(calls.load(), 1);  // the startup snapshot was built once
+
+  // WM_DISPLAYCHANGE is the shell's "geometry may have changed" event;
+  // the UI thread turns it into a rebuild request.
+  SendMessageW(ui, WM_DISPLAYCHANGE, 0, 0);
+  Sleep(100);  // let the rebuild request start before probing
+  DWORD_PTR result = 0;
+  const LRESULT responded = SendMessageTimeoutW(
+      ui, WM_NULL, 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, 150, &result);
+  EXPECT_NE(responded, 0)
+      << "the UI thread was blocked by the geometry provider";
+  thread.Stop();
 }
 
 TEST(OverlayClick, DispatchesLeftClickToOwner) {
@@ -484,46 +618,125 @@ TEST(OverlayStrip, GrowsToShowEveryVisibleIcon) {
   thread.Stop();
 }
 
-// A busy tray has more icons than the strip can show, and the icons that
-// matter are the ones that just registered: the newest icon must sit at
-// the strip's left edge, where clipping can never hide it.
-TEST(OverlayStrip, NewestIconIsLeftmost) {
-  auto enumerate = []() {
-    return std::vector<MonitorTaskbar>{SyntheticTaskbar()};
-  };
+TEST(OverlayStrip, ModelGrowthRetainsTheExistingWindow) {
   ModelInbox inbox;
   TrayModel model;
+  model.Apply(MakeAdd(1, L"first"));
   OverlayThread thread;
-  ASSERT_TRUE(thread.Start(&inbox, &model, enumerate, {}, NoPromotionStore));
-
-  inbox.Push(MakeAdd(1, L"first"));
+  ASSERT_TRUE(thread.Start(&inbox, &model, []() {
+    return std::vector<MonitorTaskbar>{SyntheticTaskbar()};
+  }, {}, NoPromotionStore));
+  const HWND before = FirstOverlayWindow();
+  ASSERT_NE(before, nullptr);
+  const int width = OverlayWidth();
   inbox.Push(MakeAdd(2, L"second"));
-  inbox.Push(MakeAdd(3, L"third"));
-
-  const HWND overlay = FirstOverlayWindow();
-  ASSERT_NE(overlay, nullptr);
-  RECT rect = {};
-  ASSERT_NE(GetWindowRect(overlay, &rect), FALSE);
-  const int height = rect.bottom - rect.top;
-
-  // The tip can be read only once the icon is applied; waiting for the
-  // newest tip also proves the earlier adds were applied before it.
-  wchar_t text[128] = {};
-  for (int waited = 0; waited < 3000 && wcscmp(text, L"third") != 0;
-       waited += 50) {
-    Sleep(50);
-    SendMessageW(overlay, WM_MOUSEMOVE, 0, MAKELPARAM(4, height / 2));
-    const HWND tip = FindTooltip();
-    if (tip == nullptr) {
-      continue;
-    }
-    GetWindowTextW(tip, text, static_cast<int>(std::size(text)));
+  for (int elapsed = 0; elapsed < 1000 && OverlayWidth() <= width; elapsed += 10) {
+    Sleep(10);
   }
-  EXPECT_STREQ(text, L"third");
-
+  EXPECT_GT(OverlayWidth(), width);
+  EXPECT_EQ(FirstOverlayWindow(), before);
+  EXPECT_NE(IsWindow(before), FALSE);
   thread.Stop();
 }
 
+// A geometry provider can fail temporarily (UIA timeout, shell restart).
+// The strip must be hidden, not destroyed: the same window comes back
+// when the metadata returns, with no flicker of a new HWND.
+TEST(OverlayStrip, TemporaryMetadataFailureKeepsTheExistingWindow) {
+  static std::atomic<bool> boundsKnown{true};
+  boundsKnown = true;
+  auto enumerate = []() {
+    MonitorTaskbar mt = SyntheticTaskbar();
+    if (!boundsKnown.load()) {
+      mt.hasTaskListBounds = false;  // unknown: the strip must not guess
+    }
+    return std::vector<MonitorTaskbar>{mt};
+  };
+  ModelInbox inbox;
+  TrayModel model;
+  model.Apply(MakeAdd(1, L"one"));
+  OverlayThread thread;
+  ASSERT_TRUE(thread.Start(&inbox, &model, enumerate, {}, NoPromotionStore));
+  const HWND first = FirstOverlayWindow();
+  ASSERT_NE(first, nullptr);
+
+  boundsKnown = false;
+  SendMessageW(thread.uiHwnd(), WM_DISPLAYCHANGE, 0, 0);
+  for (int waited = 0; waited < 2000 && IsWindowVisible(first) != FALSE;
+       waited += 10) {
+    Sleep(10);
+  }
+  EXPECT_EQ(IsWindow(first), TRUE) << "the unsafe strip was destroyed";
+  EXPECT_EQ(IsWindowVisible(first), FALSE);
+
+  boundsKnown = true;
+  SendMessageW(thread.uiHwnd(), WM_DISPLAYCHANGE, 0, 0);
+  for (int waited = 0; waited < 2000 && IsWindowVisible(first) == FALSE;
+       waited += 10) {
+    Sleep(10);
+  }
+  EXPECT_EQ(FirstOverlayWindow(), first);
+  EXPECT_NE(IsWindowVisible(first), FALSE);
+  thread.Stop();
+}
+
+TEST(OverlaySmoke, UnsafeGeometryHidesButRetainsTheWindow) {
+  const HMONITOR monitor =
+      MonitorFromPoint(POINT{}, MONITOR_DEFAULTTOPRIMARY);
+  const RECT strip{100, 100, 300, 148};
+  auto overlay = Overlay::Create(monitor, strip);
+  ASSERT_NE(overlay, nullptr);
+  const HWND hwnd = overlay->hwnd();
+  overlay->SetGeometrySafe(false);
+  EXPECT_EQ(IsWindow(hwnd), TRUE);
+  EXPECT_EQ(IsWindowVisible(hwnd), FALSE);
+  overlay->SetGeometrySafe(true);
+  EXPECT_NE(IsWindowVisible(hwnd), FALSE);
+}
+
+TEST(OverlaySmoke, RepositionKeepsTheWindowAcrossSizeChanges) {
+  const HMONITOR monitor =
+      MonitorFromPoint(POINT{}, MONITOR_DEFAULTTOPRIMARY);
+  auto overlay = Overlay::Create(monitor, RECT{100, 100, 300, 148});
+  ASSERT_NE(overlay, nullptr);
+  const HWND hwnd = overlay->hwnd();
+  overlay->SetIcons({IconView{.serial = 1}});
+  EXPECT_TRUE(overlay->Reposition(RECT{100, 100, 420, 148}, {}));
+  EXPECT_EQ(overlay->hwnd(), hwnd);
+  const auto bitmap = overlay->RenderToBitmap(96, true);
+  ASSERT_TRUE(bitmap.has_value());
+  EXPECT_EQ(bitmap->width, 320);
+  EXPECT_EQ(bitmap->height, 48);
+}
+
+// A busy tray has more icons than the strip can show, and the icons that
+// matter are the ones that just registered: the newest icon must sit at
+// the strip's left edge, where clipping can never hide it.
+TEST(OverlayStrip, RegistrationOrderRemainsStableWithoutShellOrder) {
+  ModelInbox inbox;
+  TrayModel model;
+  std::atomic<UINT> clicked{0};
+  OverlayThread thread;
+  ASSERT_TRUE(thread.Start(&inbox, &model, []() {
+    return std::vector<MonitorTaskbar>{SyntheticTaskbar()};
+  }, [&clicked](const DispatchCall& call) {
+    if (call.event == TrayEvent::kLeftUp) clicked.store(call.target.uid);
+  }, NoPromotionStore));
+  inbox.Push(MakeAdd(1, L"first"));
+  inbox.Push(MakeAdd(2, L"second"));
+  inbox.Push(MakeAdd(3, L"third"));
+  for (int waited = 0; waited < 1500 && clicked.load() == 0; waited += 10) {
+    Sleep(10);
+    if (OverlayWidth() < 96) continue;
+    const HWND overlay = FirstOverlayWindow();
+    RECT rect = {};
+    if (overlay != nullptr && GetWindowRect(overlay, &rect)) {
+      SendMessageW(overlay, WM_LBUTTONUP, 0, MAKELPARAM(4, (rect.bottom - rect.top) / 2));
+    }
+  }
+  EXPECT_EQ(clicked.load(), 1U);
+  thread.Stop();
+}
 
 // v4 owners learn about the pointer crossing an icon boundary through
 // NIN_POPUPOPEN / NIN_POPUPCLOSE (report 07). The overlay maps cell
@@ -544,7 +757,7 @@ TEST(OverlayClick, EnterAndLeaveEmitPopupEvents) {
   overlay->Render();
 
   const int height = strip.bottom - strip.top;
-  const int slot = traymirror::IconPxForDpi(96) + traymirror::IconGapPxForDpi(96);
+  const int slot = traymirror::TrayButtonSizeForDpi(GetDpiForWindow(overlay->hwnd())).cx;
   SendMessageW(overlay->hwnd(), WM_MOUSEMOVE, 0, MAKELPARAM(4, height / 2));
   SendMessageW(overlay->hwnd(), WM_MOUSEMOVE, 0,
                MAKELPARAM(4 + slot, height / 2));
@@ -660,6 +873,47 @@ TEST(OverlayPromotion, StoreMovesIconOffTheStripOnModelChange) {
   thread.Stop();
 
   ASSERT_EQ(model.icons().size(), 1U);
+  EXPECT_FALSE(model.icons()[0].promoted);
+
+  DestroyWindow(owner);
+  RegDeleteTreeW(HKEY_CURRENT_USER, kPromotionScratch);
+}
+
+// A delete+add batch that leaves the icon count unchanged still changes
+// identity, so the store must be re-read in that same batch; otherwise
+// the re-registered icon inherits the model default (promoted) instead
+// of the shell's placement.
+TEST(OverlayPromotion, DeleteAddBatchWithSameCountReappliesPlacement) {
+  RegDeleteTreeW(HKEY_CURRENT_USER, kPromotionScratch);
+  WritePromotionEntry(0);
+  const HWND owner = CreateOwnerWindow();
+  ASSERT_NE(owner, nullptr);
+
+  auto enumerate = []() {
+    return std::vector<MonitorTaskbar>{SyntheticTaskbar()};
+  };
+  ModelInbox inbox;
+  TrayModel model;
+  OverlayThread thread;
+  ASSERT_TRUE(thread.Start(&inbox, &model, enumerate, {},
+                           OpenPromotionScratch));
+  const HWND ui = thread.uiHwnd();
+  ASSERT_NE(ui, nullptr);
+
+  inbox.Push(MakeAddFor(owner, 1, L"first"));
+  SendMessageW(ui, traymirror::kMsgInbox, 0, 0);
+  ASSERT_EQ(model.icons().size(), 1U);
+  ASSERT_FALSE(model.icons()[0].promoted);
+
+  TrayMessage del = MakeAddFor(owner, 1, L"first");
+  del.nim = 2;  // NIM_DELETE
+  inbox.Push(del);
+  inbox.Push(MakeAddFor(owner, 1, L"second"));
+  SendMessageW(ui, traymirror::kMsgInbox, 0, 0);
+  thread.Stop();
+
+  ASSERT_EQ(model.icons().size(), 1U);
+  EXPECT_EQ(model.icons()[0].tip, L"second");
   EXPECT_FALSE(model.icons()[0].promoted);
 
   DestroyWindow(owner);

@@ -11,6 +11,17 @@
 
 namespace traymirror {
 
+// Bounds exposed by the primary notification area, in physical pixels at
+// referenceDpi. Defaults are used only when Explorer exposes no icon bounds.
+struct TrayMetrics {
+  int buttonWidth = 32;
+  int buttonHeight = 48;
+  UINT referenceDpi = 96;
+};
+
+SIZE TrayButtonSizeForDpi(UINT dpi, const TrayMetrics& metrics = {});
+bool ShouldExposeTray(const RECT& monitor, const RECT& foreground, bool shellDesktop = false);
+
 struct MonitorTaskbar {
   HMONITOR monitor = nullptr;
   RECT monitorRect = {};
@@ -21,13 +32,17 @@ struct MonitorTaskbar {
   // enumeration reserves measured space at the right edge instead, so
   // the strip still cannot cover the clock.
   RECT clockRect = {};
-  // The task list's right edge (UIA, MSTaskListWClass), or 0 when it
-  // cannot be measured. The strip must never start left of it: the
+  // The task list's right edge (UIA and native child HWND bounds).
+  // hasTaskListBounds distinguishes unknown bounds from zero/negative
+  // coordinates. The strip must never start left of this edge: the
   // overlay is topmost, so anything it covers is unclickable — task
   // buttons included. The gap between this edge and the clock shrinks
   // as the user opens windows.
   LONG taskListRight = 0;
   bool hasTaskbar = false;
+  TrayMetrics trayMetrics;
+  HWND taskbarWindow = nullptr;
+  bool hasTaskListBounds = false;
 };
 
 using MonitorEnumerator = std::function<std::vector<MonitorTaskbar>()>;
@@ -43,6 +58,5 @@ RECT ComputeOverlayStripRect(const MonitorTaskbar& mt, int widthPx);
 
 // Icon metrics per DPI (plan ruling R7).
 int IconPxForDpi(UINT dpi);
-int IconGapPxForDpi(UINT dpi);
 
 }  // namespace traymirror

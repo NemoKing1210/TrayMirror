@@ -13,6 +13,7 @@ struct HostAppConfig {
   bool disableHook = false;
   bool diagnostic = false;
   bool resync = false;  // signal a running host and exit
+  bool version = false;  // print the build identifier and executable path
   int durationSec = 0;  // 0: run until Ctrl+C / console close
   std::string logLevel;
 

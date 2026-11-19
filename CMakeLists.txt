@@ -7,7 +7,14 @@ if(NOT MSVC)
 endif()
 
 # Spec 12.8: /W4 /WX; C++20 (section 0). A warning is a build failure.
-add_compile_options(/W4 /WX /std:c++20)
+# Sources are UTF-8: without /utf-8 MSVC decodes non-ASCII literals with
+# the system ANSI code page, which silently corrupts measured shell text
+# (for example a captured Russian tooltip) on a non-English machine.
+add_compile_options(
+  $<$<COMPILE_LANGUAGE:CXX>:/W4>
+  $<$<COMPILE_LANGUAGE:CXX>:/WX>
+  $<$<COMPILE_LANGUAGE:CXX>:/std:c++20>
+  $<$<COMPILE_LANGUAGE:CXX>:/utf-8>)
 
 option(TRAYMIRROR_BUILD_SPK "Build the stage 0 spike tools" ON)
 option(TRAYMIRROR_BUILD_TESTS "Build unit and fuzz tests" ON)

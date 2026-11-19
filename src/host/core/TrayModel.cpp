@@ -170,6 +170,15 @@ bool TrayModel::SetPromotion(const IconKey& key, bool promoted) {
   return true;
 }
 
+bool TrayModel::SetShellOrder(const IconKey& key, UINT order) {
+  const size_t idx = IndexOf(key);
+  if (idx == kNoIndex || icons_[idx].shellOrder == order) {
+    return false;
+  }
+  icons_[idx].shellOrder = order;
+  return true;
+}
+
 bool TrayModel::RemoveOwner(HWND owner) {
   if (owner == nullptr) {
     return false;

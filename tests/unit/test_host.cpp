@@ -2,6 +2,7 @@
 // instance, kill switch, tray absence), and the reader loop (plan
 // task 8). No live Explorer contact: the tray-window finder is
 // injectable and every live-install path is stubbed out.
+#include "BuildInfo.h"
 #include "HostApp.h"
 #include "Proto.h"
 #include "ReaderThread.h"
@@ -48,6 +49,41 @@ TEST(HostApp, ParsesFlags) {
   EXPECT_FALSE(cfg.selftest);
   EXPECT_FALSE(cfg.disableHook);
   EXPECT_EQ(cfg.durationSec, 0);
+}
+
+TEST(HostApp, ParsesVersionFlag) {
+  HostAppConfig cfg = Parse({L"--version"});
+  EXPECT_TRUE(cfg.version);
+}
+
+TEST(HostApp, VersionRunExitsZeroWithoutContactingExplorer) {
+  // The acceptance checklist has to prove which binary is running: the
+  // version run must answer before the single-instance gate and before
+  // any tray lookup, so it works even while another host is resident.
+  static bool trayTouched = false;
+  trayTouched = false;
+  HostAppConfig cfg;
+  cfg.version = true;
+  cfg.findTrayWnd = []() -> HWND {
+    trayTouched = true;
+    return nullptr;
+  };
+  EXPECT_EQ(HostAppRun(cfg), 0);
+  EXPECT_FALSE(trayTouched);
+}
+
+TEST(BuildInfo, IdIsEmbeddedAndNotPlaceholder) {
+  const std::string id = traymirror::BuildId();
+  EXPECT_FALSE(id.empty());
+  EXPECT_NE(id, "unknown")
+      << "the binary must embed a configure-time build identifier";
+}
+
+TEST(BuildInfo, ExecutablePathNamesAnExistingBinary) {
+  const std::wstring path = traymirror::ExecutablePath();
+  ASSERT_FALSE(path.empty());
+  EXPECT_EQ(path.find(L".exe"), path.size() - 4);
+  EXPECT_NE(GetFileAttributesW(path.c_str()), INVALID_FILE_ATTRIBUTES);
 }
 
 TEST(HostApp, RejectsUnknownFlag) {

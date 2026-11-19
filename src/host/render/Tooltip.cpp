@@ -1,68 +1,71 @@
 #include "render/Tooltip.h"
 
 #include "Log.h"
+#include "render/Theme.h"
 
-#include <d2d1helper.h>
-#include <shellscalingapi.h>
-
+#include <algorithm>
+#include <bit>
 #include <cmath>
+#include <cstdint>
 
 namespace traymirror {
 namespace {
 
 constexpr wchar_t kTooltipClass[] = L"TrayMirrorTooltip";
 
-// The measured cells (docs/visual-spec.md, report 09), in DIPs.
-constexpr int kPadXDip = 10;      // text to border, horizontal
-constexpr int kPadYDip = 8;       // line box to border, vertical
-constexpr int kRadiusDip = 4;     // corner radius
-constexpr int kGapDip = 9;        // tooltip bottom to the taskbar row
-constexpr int kFontDip = 12;      // Segoe UI, 9 pt at 96 DPI
+// Used only if Windows cannot supply NONCLIENTMETRICS for the popup.
 constexpr wchar_t kFontFamily[] = L"Segoe UI";
-
-D2D1_COLOR_F ToColorF(COLORREF color, float alpha = 1.0F) {
-  return D2D1::ColorF(GetRValue(color) / 255.0F, GetGValue(color) / 255.0F,
-                      GetBValue(color) / 255.0F, alpha);
-}
 
 int Scaled(int dip, int dpi) { return MulDiv(dip, dpi, 96); }
 
-bool SystemUsesDarkTheme() {
-  HKEY key = nullptr;
-  if (RegOpenKeyExW(
-          HKEY_CURRENT_USER,
-          L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-          0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) {
-    return true;  // the Win11 default taskbar is dark
+// GDI has no emergency break: a word wider than the box would run past
+// the edge. This inserts a hard break at the first character that no
+// longer fits, so an unbroken 600-character tip wraps instead of
+// overflowing the monitor.
+std::wstring WrapToWidth(HDC dc, const std::wstring& text, int width) {
+  if (width <= 0) {
+    return text;
   }
-  DWORD light = 1;
-  DWORD size = sizeof(light);
-  DWORD type = 0;
-  const LONG status = RegQueryValueExW(
-      key, L"AppsUseLightTheme", nullptr, &type,
-      reinterpret_cast<LPBYTE>(&light), &size);
-  RegCloseKey(key);
-  if (status != ERROR_SUCCESS || type != REG_DWORD) {
-    return true;
+  std::wstring out;
+  out.reserve(text.size() + (text.size() / 8));
+  std::wstring line;
+  for (const wchar_t ch : text) {
+    if (ch == L'\n') {
+      out += line;
+      out += L'\n';
+      line.clear();
+      continue;
+    }
+    line.push_back(ch);
+    SIZE extent = {};
+    if (GetTextExtentPoint32W(dc, line.c_str(),
+                              static_cast<int>(line.size()), &extent) != FALSE &&
+        extent.cx > width && line.size() > 1) {
+      line.pop_back();
+      out += line;
+      out += L'\n';
+      line.assign(1, ch);
+    }
   }
-  return light == 0;
+  out += line;
+  return out;
+}
+
+BYTE Channel(float value) {
+  return static_cast<BYTE>(std::lround(std::clamp(value, 0.0F, 1.0F) * 255.0F));
+}
+
+COLORREF ToColorRef(const D2D1_COLOR_F& color) {
+  return RGB(Channel(color.r), Channel(color.g), Channel(color.b));
 }
 
 }  // namespace
-
-TooltipPalette TooltipPalette::For(bool dark) {
-  if (dark) {
-    return TooltipPalette{.background = RGB(41, 45, 50),   // #292D32, measured
-                          .text = RGB(247, 247, 247)};    // #F7F7F7, measured
-  }
-  return TooltipPalette{.background = RGB(249, 249, 249),  // derived
-                        .text = RGB(26, 26, 26)};         // derived
-}
 
 bool Tooltip::EnsureClass() {
   static const bool registered = []() {
     WNDCLASSEXW wc = {};
     wc.cbSize = sizeof(wc);
+    wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
     wc.lpfnWndProc = &Tooltip::WndProc;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.lpszClassName = kTooltipClass;
@@ -76,6 +79,43 @@ bool Tooltip::EnsureClass() {
 
 LRESULT CALLBACK Tooltip::WndProc(HWND hwnd, UINT message, WPARAM wparam,
                                   LPARAM lparam) {
+  if (message == WM_NCCREATE) {
+    const auto* create = std::bit_cast<const CREATESTRUCTW*>(lparam);
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA,
+                      reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+  }
+  auto* self = std::bit_cast<Tooltip*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+  if (message == WM_NCHITTEST) {
+    return HTTRANSPARENT;
+  }
+  if (message == WM_MOUSEACTIVATE) {
+    return MA_NOACTIVATE;
+  }
+  if (self != nullptr && message == WM_NCDESTROY) {
+    self->hwnd_ = nullptr;
+    self->visible_ = false;
+  }
+  if (self != nullptr && message == WM_PAINT) {
+    PAINTSTRUCT paint = {};
+    const HDC dc = BeginPaint(hwnd, &paint);
+    self->Paint(dc);
+    EndPaint(hwnd, &paint);
+    return 0;
+  }
+  if (self != nullptr && message == WM_PRINTCLIENT) {
+    // Same pixels as WM_PAINT, into a caller-supplied DC: used by tests
+    // and by window-capture tools.
+    self->Paint(std::bit_cast<HDC>(static_cast<std::uintptr_t>(wparam)));
+    return 0;
+  }
+  if (message == WM_ERASEBKGND) {
+    return 1;
+  }
+  if (self != nullptr && self->visible_ &&
+      (message == WM_SETTINGCHANGE || message == WM_THEMECHANGED)) {
+    self->Show(self->text_, self->anchor_);
+    return 0;
+  }
   return DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
@@ -91,13 +131,10 @@ std::unique_ptr<Tooltip> Tooltip::Create(HWND owner, ThemeProbe dark) {
   std::unique_ptr<Tooltip> tip(new Tooltip());
   tip->owner_ = owner;
   tip->dark_ = std::move(dark);
-  if (!tip->InitFactories()) {
-    return nullptr;
-  }
   tip->hwnd_ = CreateWindowExW(
-      WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED,
+      WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
       kTooltipClass, L"TrayMirrorTooltip", WS_POPUP, 0, 0, 0, 0, nullptr,
-      nullptr, GetModuleHandleW(nullptr), nullptr);
+      nullptr, GetModuleHandleW(nullptr), tip.get());
   if (tip->hwnd_ == nullptr) {
     InitHostLogging("")->error("tooltip window creation failed ({})",
                                GetLastError());
@@ -107,229 +144,137 @@ std::unique_ptr<Tooltip> Tooltip::Create(HWND owner, ThemeProbe dark) {
 }
 
 Tooltip::~Tooltip() {
+  if (font_ != nullptr) {
+    DeleteObject(font_);
+    font_ = nullptr;
+  }
   if (hwnd_ != nullptr) {
     DestroyWindow(hwnd_);
     hwnd_ = nullptr;
   }
 }
 
-bool Tooltip::InitFactories() {
-  auto log = InitHostLogging("");
-  if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
-                               d2d_.GetAddressOf())) != 0) {
-    log->warn("tooltip: D2D1CreateFactory failed");
-    return false;
-  }
-  if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
-                                 __uuidof(IDWriteFactory),
-                                 reinterpret_cast<IUnknown**>(
-                                     dwrite_.GetAddressOf()))) != 0) {
-    log->warn("tooltip: DWriteCreateFactory failed");
-    return false;
-  }
-  const D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
-      D2D1_RENDER_TARGET_TYPE_DEFAULT,
-      D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-                        D2D1_ALPHA_MODE_PREMULTIPLIED),
-      96.0F, 96.0F);  // 1 DIP = 1 px: the scaling is done with MulDiv
-  if (FAILED(d2d_->CreateDCRenderTarget(&props, target_.GetAddressOf())) != 0) {
-    log->warn("tooltip: CreateDCRenderTarget failed");
-    return false;
-  }
-  return true;
-}
-
 bool Tooltip::UsesDarkTheme() const {
   return dark_ ? dark_() : SystemUsesDarkTheme();
 }
 
-bool Tooltip::Measure(const std::wstring& text, int dpi, int* width,
-                      int* height) {
-  // The format is rebuilt per tip: the font size follows the monitor DPI,
-  // and a tooltip is shown once per hover, not per frame.
-  format_.Reset();
-  const auto fontSize = static_cast<float>(Scaled(kFontDip, dpi));
-  if (FAILED(dwrite_->CreateTextFormat(kFontFamily, nullptr,
-                                       DWRITE_FONT_WEIGHT_REGULAR,
-                                       DWRITE_FONT_STYLE_NORMAL,
-                                       DWRITE_FONT_STRETCH_NORMAL, fontSize,
-                                       L"", format_.GetAddressOf())) != 0) {
+bool Tooltip::Measure(const std::wstring& text, int dpi, int maxWidth,
+                      int maxHeight, int* width, int* height) {
+  NONCLIENTMETRICSW metrics = {};
+  metrics.cbSize = sizeof(metrics);
+  const bool systemFont = SystemParametersInfoForDpi(
+      SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0,
+      static_cast<UINT>(dpi)) != FALSE;
+  HFONT font = systemFont ? CreateFontIndirectW(&metrics.lfStatusFont) : nullptr;
+  if (font == nullptr) {
+    font = CreateFontW(-Scaled(12, dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE,
+                       FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                       CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                       DEFAULT_PITCH | FF_DONTCARE, kFontFamily);
+  }
+  if (font == nullptr) {
     return false;
   }
-  format_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-
-  Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
-  if (FAILED(dwrite_->CreateTextLayout(
-          text.c_str(), static_cast<UINT32>(text.size()), format_.Get(),
-          4096.0F, 4096.0F, layout.GetAddressOf())) != 0) {
+  HDC dc = GetDC(hwnd_);
+  if (dc == nullptr) {
+    DeleteObject(font);
     return false;
   }
-  DWRITE_TEXT_METRICS metrics = {};
-  if (FAILED(layout->GetMetrics(&metrics)) != 0) {
-    return false;
+  const HGDIOBJ previousFont = SelectObject(dc, font);
+  SetBkMode(dc, TRANSPARENT);
+  const int horizontal = Scaled(metrics::kTooltipPadLeft +
+                                metrics::kTooltipPadRight, dpi);
+  const int vertical = Scaled(metrics::kTooltipPadTop +
+                              metrics::kTooltipPadBottom, dpi);
+  const int contentWidth = (std::max)(1, maxWidth - horizontal);
+  const int contentHeight = (std::max)(1, maxHeight - vertical);
+  std::wstring wrapped = WrapToWidth(dc, text, contentWidth);
+  RECT calc = {.left = 0, .top = 0, .right = contentWidth,
+               .bottom = contentHeight};
+  DrawTextW(dc, wrapped.c_str(), static_cast<int>(wrapped.size()), &calc,
+            DT_CALCRECT | DT_NOPREFIX | DT_WORDBREAK);
+  SelectObject(dc, previousFont);
+  ReleaseDC(hwnd_, dc);
+  if (font_ != nullptr) {
+    DeleteObject(font_);
   }
-  *width = static_cast<int>(std::ceil(metrics.widthIncludingTrailingWhitespace)) +
-           (2 * Scaled(kPadXDip, dpi));
-  *height = static_cast<int>(std::ceil(metrics.height)) +
-            (2 * Scaled(kPadYDip, dpi));
+  font_ = font;
+  wrapped_ = std::move(wrapped);
+  *width = (std::min)(maxWidth, static_cast<int>(calc.right) + horizontal);
+  *height = (std::min)(maxHeight, static_cast<int>(calc.bottom) + vertical);
   return *width > 0 && *height > 0;
 }
 
 void Tooltip::Show(const std::wstring& text, const RECT& iconRect) {
-  if (hwnd_ == nullptr) {
-    return;
-  }
-  if (text.empty()) {
+  if (hwnd_ == nullptr || text.empty()) {
     Hide();
     return;
   }
-  const UINT dpi = owner_ != nullptr ? GetDpiForWindow(owner_) : 96;
-  const int scaledDpi = static_cast<int>(dpi == 0 ? 96 : dpi);
+  const UINT dpi = GetDpiForWindow(owner_);
+  dpi_ = static_cast<int>(dpi == 0 ? 96 : dpi);
+  MONITORINFO monitor = {};
+  monitor.cbSize = sizeof(monitor);
+  RECT probe = iconRect;
+  if (GetMonitorInfoW(MonitorFromRect(&probe, MONITOR_DEFAULTTONEAREST),
+                       &monitor) == FALSE) {
+    Hide();
+    return;
+  }
+  const RECT bounds = monitor.rcWork;
   int width = 0;
   int height = 0;
-  if (!Measure(text, scaledDpi, &width, &height)) {
+  if (!Measure(text, dpi_, (std::min)(Scaled(480, dpi_), static_cast<int>(bounds.right - bounds.left)),
+               bounds.bottom - bounds.top, &width, &height)) {
     Hide();
     return;
   }
-
-  // Centred on the icon, clamped into the icon's monitor; above it when
-  // there is room, below it otherwise (measured: box centre 2359.5 for an
-  // icon at 2360, 9 px above the taskbar row).
-  RECT monitorRect = {};
-  MONITORINFO mi = {};
-  mi.cbSize = sizeof(mi);
-  RECT probe = iconRect;
-  const HMONITOR monitor = MonitorFromRect(&probe, MONITOR_DEFAULTTONEAREST);
-  if (GetMonitorInfoW(monitor, &mi) != FALSE) {
-    monitorRect = mi.rcMonitor;
-  } else {
-    monitorRect = RECT{.left = 0,
-                       .top = 0,
-                       .right = GetSystemMetrics(SM_CXSCREEN),
-                       .bottom = GetSystemMetrics(SM_CYSCREEN)};
-  }
+  const int gap = Scaled(metrics::kTooltipGap, dpi_);
   int x = ((iconRect.left + iconRect.right) / 2) - (width / 2);
-  int y = iconRect.top - Scaled(kGapDip, scaledDpi) - height;
-  if (y < monitorRect.top) {
-    y = iconRect.bottom + Scaled(kGapDip, scaledDpi);
+  int y = iconRect.top - gap - height;
+  if (y < bounds.top) {
+    y = iconRect.bottom + gap;
   }
-  if (x < monitorRect.left) {
-    x = monitorRect.left;
-  }
-  if (x + width > monitorRect.right) {
-    x = monitorRect.right - width;
-  }
-
-  if (!Paint(text, width, height, scaledDpi, POINT{.x = x, .y = y})) {
-    Hide();
-    return;
-  }
-  ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
-  // The window carries the text as its title: a layered popup draws
-  // nothing but its pixels, and the title is how a caller (and the
-  // overlay's tests) reads back what the last hover produced. It is not
-  // cleared when the window hides, so the record outlives the hover.
+  x = std::clamp(x, static_cast<int>(bounds.left),
+                   static_cast<int>(bounds.right) - width);
+  y = std::clamp(y, static_cast<int>(bounds.top),
+                   static_cast<int>(bounds.bottom) - height);
+  text_ = text;
+  anchor_ = iconRect;
+  ApplyPopupAppearance(hwnd_, UsesDarkTheme(), true);
+  SetWindowPos(hwnd_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
   SetWindowTextW(hwnd_, text.c_str());
   visible_ = true;
+  InvalidateRect(hwnd_, nullptr, FALSE);
+  ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
+  UpdateWindow(hwnd_);
 }
 
-bool Tooltip::Paint(const std::wstring& text, int width, int height, int dpi,
-                    POINT destination) {
-  BITMAPV5HEADER header = {};
-  header.bV5Size = sizeof(header);
-  header.bV5Width = width;
-  header.bV5Height = -height;  // top-down
-  header.bV5Planes = 1;
-  header.bV5BitCount = 32;
-  header.bV5Compression = BI_BITFIELDS;
-  header.bV5RedMask = 0x00FF0000U;
-  header.bV5GreenMask = 0x0000FF00U;
-  header.bV5BlueMask = 0x000000FFU;
-  header.bV5AlphaMask = 0xFF000000U;
-
-  const HDC screen = GetDC(nullptr);
-  if (screen == nullptr) {
-    return false;
+void Tooltip::Paint(HDC dc) {
+  RECT client = {};
+  GetClientRect(hwnd_, &client);
+  const ThemeTokens tokens = ThemeTokens::Current(UsesDarkTheme());
+  auto* const brush = static_cast<HBRUSH>(GetStockObject(DC_BRUSH));
+  SetDCBrushColor(dc, tokens.tooltipSurface);
+  FillRect(dc, &client, brush);
+  if (font_ == nullptr) {
+    return;
   }
-  void* bits = nullptr;
-  const HBITMAP dib =
-      CreateDIBSection(screen, reinterpret_cast<BITMAPINFO*>(&header),
-                       DIB_RGB_COLORS, &bits, nullptr, 0);
-  if (dib == nullptr || bits == nullptr) {
-    ReleaseDC(nullptr, screen);
-    return false;
-  }
-  const HDC memory = CreateCompatibleDC(screen);
-  if (memory == nullptr) {
-    DeleteObject(dib);
-    ReleaseDC(nullptr, screen);
-    return false;
-  }
-  auto* const previous = SelectObject(memory, dib);
-
-  RECT bounds = {.left = 0, .top = 0, .right = width, .bottom = height};
-  bool painted = FAILED(target_->BindDC(memory, &bounds)) == 0;
-  if (painted) {
-    target_->SetDpi(96.0F, 96.0F);  // everything here is already in pixels
-    target_->BeginDraw();
-    target_->Clear(D2D1::ColorF(0.0F, 0.0F, 0.0F, 0.0F));  // transparent
-    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> background;
-    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> foreground;
-    const TooltipPalette palette = TooltipPalette::For(UsesDarkTheme());
-    painted =
-        SUCCEEDED(target_->CreateSolidColorBrush(
-            ToColorF(palette.background), background.GetAddressOf())) &&
-        SUCCEEDED(target_->CreateSolidColorBrush(ToColorF(palette.text),
-                                                 foreground.GetAddressOf()));
-    if (painted) {
-      const auto radius = static_cast<float>(Scaled(kRadiusDip, dpi));
-      const D2D1_ROUNDED_RECT box = D2D1::RoundedRect(
-          D2D1::RectF(0.5F, 0.5F, static_cast<float>(width) - 0.5F,
-                      static_cast<float>(height) - 0.5F),
-          radius, radius);
-      target_->FillRoundedRectangle(box, background.Get());
-      Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
-      if (SUCCEEDED(dwrite_->CreateTextLayout(
-              text.c_str(), static_cast<UINT32>(text.size()), format_.Get(),
-              static_cast<float>(width), static_cast<float>(height),
-              layout.GetAddressOf()))) {
-        layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-        target_->DrawTextLayout(
-            D2D1::Point2F(static_cast<float>(Scaled(kPadXDip, dpi)),
-                          static_cast<float>(Scaled(kPadYDip, dpi))),
-            layout.Get(), foreground.Get());
-      } else {
-        painted = false;
-      }
-    }
-    painted = target_->EndDraw() == S_OK && painted;
-  }
-
-  BLENDFUNCTION blend = {};
-  blend.BlendOp = AC_SRC_OVER;
-  blend.SourceConstantAlpha = 255;
-  blend.AlphaFormat = AC_SRC_ALPHA;
-  SIZE size = {.cx = width, .cy = height};
-  POINT source = {.x = 0, .y = 0};
-  if (painted && UpdateLayeredWindow(hwnd_, screen, &destination, &size, memory,
-                                     &source, 0, &blend, ULW_ALPHA) == FALSE) {
-    InitHostLogging("")->warn("tooltip: UpdateLayeredWindow failed ({})",
-                              GetLastError());
-    painted = false;
-  }
-
-  SelectObject(memory, previous);
-  DeleteDC(memory);
-  DeleteObject(dib);
-  ReleaseDC(nullptr, screen);
-  return painted;
+  const HGDIOBJ previous = SelectObject(dc, font_);
+  SetBkMode(dc, TRANSPARENT);
+  SetTextColor(dc, ToColorRef(tokens.tooltipText));
+  RECT area = {.left = Scaled(metrics::kTooltipPadLeft, dpi_),
+               .top = Scaled(metrics::kTooltipPadTop, dpi_),
+               .right = client.right - Scaled(metrics::kTooltipPadRight, dpi_),
+               .bottom = client.bottom - Scaled(metrics::kTooltipPadBottom, dpi_)};
+  DrawTextW(dc, wrapped_.c_str(), static_cast<int>(wrapped_.size()), &area,
+            DT_NOPREFIX | DT_WORDBREAK | DT_LEFT | DT_TOP);
+  SelectObject(dc, previous);
 }
 
 void Tooltip::Hide() {
-  if (hwnd_ == nullptr || !visible_) {
-    return;
+  if (hwnd_ != nullptr) {
+    ShowWindow(hwnd_, SW_HIDE);
   }
-  ShowWindow(hwnd_, SW_HIDE);
   visible_ = false;
 }
 

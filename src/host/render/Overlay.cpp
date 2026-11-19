@@ -2,12 +2,17 @@
 
 #include "Log.h"
 #include "render/CellLayout.h"
+#include "render/IconRasterizer.h"
+#include "render/Theme.h"
 #include "win/Monitors.h"
 
 #include <d2d1helper.h>
 #include <windowsx.h>
 
 #include <bit>
+#include <algorithm>
+#include <cstring>
+#include <cwchar>
 #include <iterator>
 #include <set>
 #include <utility>
@@ -21,33 +26,15 @@ constexpr wchar_t kOverlayClass[] = L"TrayMirrorOverlay";
 // outside the flyout's own message handler, so no object dies mid-frame.
 constexpr UINT kMsgFlyoutClosed = WM_APP + 4;
 
-// Solid taskbar colors used until the stage 2 visual pass pins the exact
-// system values (spec 6.3): the Win11 light and dark taskbar tones.
-constexpr D2D1_COLOR_F kLightBackground = {
-    .r = 0.953F, .g = 0.953F, .b = 0.953F, .a = 1.0F};  // #F3F3F3
-constexpr D2D1_COLOR_F kDarkBackground = {
-    .r = 0.125F, .g = 0.125F, .b = 0.125F, .a = 1.0F};  // #202020
-
-bool SystemUsesDarkTheme() {
-  HKEY key = nullptr;
-  if (RegOpenKeyExW(
-          HKEY_CURRENT_USER,
-          L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-          0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) {
-    return true;  // the Win11 default taskbar is dark
+bool SameTarget(const IconView& a, const IconView& b) {
+  if (a.target.owner == nullptr || b.target.owner == nullptr) {
+    return a.target.owner == b.target.owner && a.icon == b.icon && a.serial == b.serial;
   }
-  DWORD light = 1;
-  DWORD size = sizeof(light);
-  DWORD type = 0;
-  const LONG status = RegQueryValueExW(
-      key, L"AppsUseLightTheme", nullptr, &type,
-      reinterpret_cast<LPBYTE>(&light), &size);
-  RegCloseKey(key);
-  if (status != ERROR_SUCCESS || type != REG_DWORD) {
-    return true;
-  }
-  return light == 0;
+  return a.target.owner == b.target.owner && a.target.uid == b.target.uid &&
+         a.target.callbackMessage == b.target.callbackMessage &&
+         a.target.version == b.target.version && a.target.ownerPid == b.target.ownerPid;
 }
+
 
 }  // namespace
 
@@ -56,6 +43,7 @@ bool Overlay::EnsureClass() {
     WNDCLASSEXW wc = {};
     wc.cbSize = sizeof(wc);
     wc.style = CS_DBLCLKS;  // without it WM_LBUTTONDBLCLK never arrives
+    wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
     wc.lpfnWndProc = &Overlay::WndProc;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.lpszClassName = kOverlayClass;
@@ -87,6 +75,9 @@ LRESULT Overlay::HandleMessage(HWND hwnd, UINT message, WPARAM wparam,
   // not assigned yet, and DefWindowProc(nullptr, ...) would refuse the
   // creation.
   switch (message) {
+    case WM_SETCURSOR:
+      SetCursor(LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)));
+      return TRUE;
     case WM_ERASEBKGND:
       return 1;  // the composition surface owns the pixels
     case WM_PAINT:
@@ -98,6 +89,9 @@ LRESULT Overlay::HandleMessage(HWND hwnd, UINT message, WPARAM wparam,
       DispatchGesture(TrayEvent::kMouseMove, pt);
       return 0;
     }
+    case WM_MOUSEHOVER:
+      ShowHoveredTooltip();
+      return 0;
     case WM_LBUTTONDOWN:
       DispatchGesture(TrayEvent::kLeftDown,
                       POINT{.x = GET_X_LPARAM(lparam),
@@ -127,13 +121,26 @@ LRESULT Overlay::HandleMessage(HWND hwnd, UINT message, WPARAM wparam,
                             .y = GET_Y_LPARAM(lparam)});
       return 0;
     case WM_MOUSELEAVE:
+      tracking_ = false;
       DispatchLeave();
       ClearHover();
+      chevronHovered_ = false;
+      dirty_ = true;
+      Render();
       return 0;
+    case WM_NCDESTROY:
+      hwnd_ = nullptr;
+      return DefWindowProcW(hwnd, message, wparam, lparam);
+    case WM_MOUSEACTIVATE:
+      return MA_NOACTIVATE;
     case kMsgFlyoutClosed:
-      flyout_.reset();  // its window is already gone
+      if (flyout_ != nullptr && flyout_->hwnd() == nullptr) {
+        flyout_.reset();  // ignore a stale close from an older flyout
+      }
       return 0;
     case WM_SETTINGCHANGE:
+    case WM_THEMECHANGED:
+    case WM_DWMCOLORIZATIONCOLORCHANGED:
       ApplyTheme();
       dirty_ = true;
       Render();
@@ -153,7 +160,8 @@ LRESULT Overlay::HandleMessage(HWND hwnd, UINT message, WPARAM wparam,
 
 std::unique_ptr<Overlay> Overlay::Create(
     HMONITOR monitor, const RECT& strip,
-    std::function<void()> onGeometryInvalidated, DispatchClick onClick) {
+    std::function<void()> onGeometryInvalidated, DispatchClick onClick,
+    TrayMetrics metrics, HWND taskbarOwner) {
   auto log = InitHostLogging("");
   const int width = strip.right - strip.left;
   const int height = strip.bottom - strip.top;
@@ -170,13 +178,15 @@ std::unique_ptr<Overlay> Overlay::Create(
   std::unique_ptr<Overlay> overlay(new Overlay());
   overlay->monitor_ = monitor;
   overlay->strip_ = strip;
+  overlay->metrics_ = metrics;
   overlay->onGeometryInvalidated_ = std::move(onGeometryInvalidated);
   overlay->onClick_ = std::move(onClick);
 
   const HWND hwnd = CreateWindowExW(
-      WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST, kOverlayClass,
+      WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST |
+          WS_EX_NOREDIRECTIONBITMAP, kOverlayClass,
       L"TrayMirrorOverlay", WS_POPUP, strip.left, strip.top, width, height,
-      nullptr, nullptr, GetModuleHandleW(nullptr), overlay.get());
+      taskbarOwner, nullptr, GetModuleHandleW(nullptr), overlay.get());
   if (hwnd == nullptr) {
     log->error("overlay window creation failed ({})", GetLastError());
     return nullptr;
@@ -187,16 +197,17 @@ std::unique_ptr<Overlay> Overlay::Create(
     // Degraded, not fatal: the window stays alive and the host keeps
     // modelling, so a GPU-less remote session still logs the tray.
     log->warn("overlay composition unavailable — strip renders nothing");
+    overlay->ReleaseComposition();
   }
-  ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+  overlay->RefreshVisibility();
   overlay->Render();
   return overlay;
 }
 
 Overlay::~Overlay() {
-  if (flyout_ != nullptr) {
-    flyout_->Close();  // its window must die before ours
-  }
+  // The flyout borrows this strip's D2D device, so it must be gone before
+  // the device is released; reset destroys its window without a fade.
+  flyout_.reset();
   ReleaseComposition();
   if (hwnd_ != nullptr) {
     DestroyWindow(hwnd_);
@@ -204,20 +215,139 @@ Overlay::~Overlay() {
   }
 }
 
+bool Overlay::Reposition(const RECT& strip, TrayMetrics metrics) {
+  const int width = strip.right - strip.left;
+  const int height = strip.bottom - strip.top;
+  if (width <= 0 || height <= 0) {
+    return false;
+  }
+  if (width != strip_.right - strip_.left || height != strip_.bottom - strip_.top) {
+    if (dcomp_ != nullptr && dcompVisual_ != nullptr && surface_ != nullptr) {
+      Microsoft::WRL::ComPtr<IDCompositionSurface> replacement;
+      if (FAILED(dcomp_->CreateSurface(static_cast<UINT>(width), static_cast<UINT>(height),
+                                       DXGI_FORMAT_B8G8R8A8_UNORM,
+                                       DXGI_ALPHA_MODE_PREMULTIPLIED, replacement.GetAddressOf())) ||
+          FAILED(dcompVisual_->SetContent(replacement.Get())) || FAILED(dcomp_->Commit())) {
+        dcompVisual_->SetContent(surface_.Get());
+        dcomp_->Commit();
+        return false;
+      }
+      surface_ = std::move(replacement);
+    }
+  }
+  const bool moved = SetWindowPos(hwnd_, HWND_TOPMOST, strip.left, strip.top, width, height,
+                                   SWP_NOACTIVATE) != FALSE;
+  if (!moved) {
+    return false;
+  }
+  strip_ = strip;
+  metrics_ = metrics;
+  dirty_ = true;
+  geometrySafe_ = true;
+  RefreshVisibility();
+  if (moved && flyout_ != nullptr && flyout_->hwnd() != nullptr) {
+    flyout_->Update(overflow_, FlyoutAnchor());
+  }
+  return moved;
+}
+
+void Overlay::SetGeometrySafe(bool safe) {
+  geometrySafe_ = safe;
+  RefreshVisibility();
+}
+
+void Overlay::RefreshVisibility() {
+  const HWND owner = GetWindow(hwnd_, GW_OWNER);
+  bool show = geometrySafe_ && surface_ != nullptr &&
+              (owner == nullptr || IsWindowVisible(owner) != FALSE);
+  const HWND foreground = GetForegroundWindow();
+  RECT foregroundRect = {};
+  MONITORINFO monitor = {};
+  monitor.cbSize = sizeof(monitor);
+  if (foreground != nullptr && foreground != owner &&
+      GetWindowRect(foreground, &foregroundRect) != FALSE &&
+      GetMonitorInfoW(monitor_, &monitor) != FALSE) {
+    const HWND shell = GetShellWindow();
+    bool desktop = foreground == shell || foreground == GetDesktopWindow();
+    wchar_t name[64] = {};
+    const HWND root = GetAncestor(foreground, GA_ROOT);
+    GetClassNameW(root, name, static_cast<int>(std::size(name)));
+    if (wcscmp(name, L"WorkerW") == 0 || wcscmp(name, L"Progman") == 0) {
+      DWORD windowPid = 0;
+      DWORD shellPid = 0;
+      GetWindowThreadProcessId(root, &windowPid);
+      GetWindowThreadProcessId(shell, &shellPid);
+      desktop = desktop || (shellPid != 0 && windowPid == shellPid);
+    }
+    show = show && ShouldExposeTray(monitor.rcMonitor, foregroundRect, desktop);
+  }
+  if (show) {
+    SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0,
+                   SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+  } else {
+    if (tooltip_ != nullptr) {
+      tooltip_->Hide();
+    }
+    CloseFlyout();
+    ShowWindow(hwnd_, SW_HIDE);
+  }
+}
+
 void Overlay::SetIcons(std::vector<IconView> icons,
                        std::vector<IconView> overflow) {
-  if (flyout_ != nullptr) {
-    CloseFlyout();  // the model changed under an open flyout
+  const SIZE button = TrayButtonSizeForDpi(GetDpiForWindow(hwnd_), metrics_);
+  const auto slots = static_cast<size_t>((strip_.right - strip_.left) / button.cx);
+  const size_t reserved = overflow.empty() ? 0U : 1U;
+  if (slots > 0 && icons.size() > slots - reserved) {
+    const size_t keep = slots - 1;
+    overflow.insert(overflow.begin(),
+                    std::make_move_iterator(icons.begin() + static_cast<ptrdiff_t>(keep)),
+                    std::make_move_iterator(icons.end()));
+    icons.resize(keep);
+  }
+  const bool preserveHover = hovered_ < icons_.size() && hovered_ < icons.size() &&
+      hasChevron_ == !overflow.empty() && SameTarget(icons_[hovered_], icons[hovered_]);
+  if (!preserveHover) {
+    DispatchLeave();
+    hovered_ = kNoHover;
+    if (tooltip_ != nullptr) {
+      tooltip_->Hide();
+    }
+  }
+  chevronHovered_ = chevronHovered_ && !overflow.empty();
+  if (flyout_ != nullptr &&
+      !std::ranges::equal(overflow_, overflow,
+                   [](const IconView& a, const IconView& b) {
+                     return SameTarget(a, b) && a.serial == b.serial &&
+                            a.icon == b.icon && a.tip == b.tip;
+                   })) {
+    flyout_->Update(overflow, FlyoutAnchor());
   }
   icons_ = std::move(icons);
   overflow_ = std::move(overflow);
   dirty_ = true;
+  if (preserveHover && tooltip_ != nullptr && IsWindowVisible(tooltip_->hwnd()) != FALSE) {
+    ShowHoveredTooltip();
+  }
 }
 
 void Overlay::ApplyTheme() { dark_ = SystemUsesDarkTheme(); }
 
 bool Overlay::InitComposition() {
   auto log = InitHostLogging("");
+  const HRESULT apartment = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  ownsComApartment_ = SUCCEEDED(apartment);
+  if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+                              CLSCTX_INPROC_SERVER,
+                              IID_PPV_ARGS(wic_.GetAddressOf())))) {
+    return false;
+  }
+  if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
+                                 __uuidof(IDWriteFactory),
+                                 reinterpret_cast<IUnknown**>(
+                                     dwrite_.GetAddressOf())))) {
+    return false;
+  }
   const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_0,
                                       D3D_FEATURE_LEVEL_10_1,
                                       D3D_FEATURE_LEVEL_10_0};
@@ -295,6 +425,9 @@ bool Overlay::InitComposition() {
 }
 
 void Overlay::ReleaseComposition() {
+  cache_.Prune({});
+  dwrite_.Reset();
+  wic_.Reset();
   surface_.Reset();
   dcompVisual_.Reset();
   dcompTarget_.Reset();
@@ -303,13 +436,16 @@ void Overlay::ReleaseComposition() {
   d2dDevice_.Reset();
   d2dFactory_.Reset();
   d3d_.Reset();
+  if (ownsComApartment_) {
+    CoUninitialize();
+    ownsComApartment_ = false;
+  }
 }
 
 void Overlay::Render() {
   if (!dirty_) {
     return;
   }
-  dirty_ = false;
   if (surface_ == nullptr || dcomp_ == nullptr) {
     return;  // degraded: composition unavailable
   }
@@ -329,8 +465,12 @@ void Overlay::Render() {
   }
   dc->SetTransform(D2D1::Matrix3x2F::Translation(
       static_cast<float>(offset.x), static_cast<float>(offset.y)));
-  const D2D1_COLOR_F background = dark_ ? kDarkBackground : kLightBackground;
-  dc->Clear(&background);
+  dc->SetDpi(96.0F, 96.0F);  // geometry is already in physical pixels
+  // The strip paints nothing but its buttons: the taskbar underneath keeps
+  // its own material and theme, which is what the real notification area
+  // looks like (report 11).
+  const D2D1_COLOR_F transparent = D2D1::ColorF(0.0F, 0.0F, 0.0F, 0.0F);
+  dc->Clear(&transparent);
   DrawIcons(dc.Get(), width, height);
   hr = surface_->EndDraw();
   if (FAILED(hr) != 0) {
@@ -340,7 +480,89 @@ void Overlay::Render() {
   hr = dcomp_->Commit();
   if (FAILED(hr) != 0) {
     log->warn("composition commit failed ({:#x})", static_cast<unsigned>(hr));
+    return;
   }
+  dirty_ = false;
+}
+
+std::optional<Overlay::Bitmap> Overlay::RenderToBitmap(int dpi, bool dark) {
+  if (d2dContext_ == nullptr || dpi <= 0) {
+    return std::nullopt;
+  }
+  const int width = strip_.right - strip_.left;
+  const int height = strip_.bottom - strip_.top;
+  if (width <= 0 || height <= 0) {
+    return std::nullopt;
+  }
+  const D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(
+      D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+      D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                        D2D1_ALPHA_MODE_PREMULTIPLIED),
+      static_cast<float>(dpi), static_cast<float>(dpi));
+  Microsoft::WRL::ComPtr<ID2D1Bitmap1> target;
+  if (FAILED(d2dContext_->CreateBitmap(
+          D2D1::SizeU(static_cast<UINT32>(width), static_cast<UINT32>(height)),
+          nullptr, 0, props, target.GetAddressOf())) != 0) {
+    return std::nullopt;
+  }
+  // A CPU-readable copy: Direct2D refuses to Map a render target, so the
+  // pixels are staged into a bitmap created for CPU_READ.
+  const D2D1_BITMAP_PROPERTIES1 readbackProps = D2D1::BitmapProperties1(
+      D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+      D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                        D2D1_ALPHA_MODE_PREMULTIPLIED),
+      static_cast<float>(dpi), static_cast<float>(dpi));
+  Microsoft::WRL::ComPtr<ID2D1Bitmap1> readback;
+  if (FAILED(d2dContext_->CreateBitmap(
+          D2D1::SizeU(static_cast<UINT32>(width), static_cast<UINT32>(height)),
+          nullptr, 0, readbackProps, readback.GetAddressOf())) != 0) {
+    return std::nullopt;
+  }
+  Microsoft::WRL::ComPtr<ID2D1Image> previousTarget;
+  d2dContext_->GetTarget(previousTarget.GetAddressOf());
+  D2D1_MATRIX_3X2_F previousTransform = {};
+  d2dContext_->GetTransform(&previousTransform);
+  FLOAT previousDpiX = 96.0F;
+  FLOAT previousDpiY = 96.0F;
+  d2dContext_->GetDpi(&previousDpiX, &previousDpiY);
+  const bool previousDark = dark_;
+
+  d2dContext_->SetTarget(target.Get());
+  d2dContext_->SetTransform(D2D1::Matrix3x2F::Identity());
+  d2dContext_->SetDpi(96.0F, 96.0F);
+  dark_ = dark;
+  const D2D1_COLOR_F transparent = D2D1::ColorF(0.0F, 0.0F, 0.0F, 0.0F);
+  d2dContext_->BeginDraw();
+  d2dContext_->Clear(&transparent);
+  DrawIcons(d2dContext_.Get(), width, height, dpi);
+  // EndDraw is what flushes the batch: without it the target bitmap is
+  // still empty when it is copied.
+  const HRESULT drawn = d2dContext_->EndDraw();
+
+  dark_ = previousDark;
+  d2dContext_->SetDpi(previousDpiX, previousDpiY);
+  d2dContext_->SetTransform(previousTransform);
+  d2dContext_->SetTarget(previousTarget.Get());
+
+  if (FAILED(drawn) != 0) {
+    return std::nullopt;
+  }
+  D2D1_MAPPED_RECT mapped = {};
+  if (FAILED(readback->CopyFromBitmap(nullptr, target.Get(), nullptr)) != 0 ||
+      FAILED(readback->Map(D2D1_MAP_OPTIONS_READ, &mapped)) != 0) {
+    return std::nullopt;
+  }
+  Bitmap out;
+  out.width = width;
+  out.height = height;
+  out.pixels.resize(static_cast<size_t>(width) * static_cast<size_t>(height));
+  for (int y = 0; y < height; ++y) {
+    std::memcpy(&out.pixels[static_cast<size_t>(y) * static_cast<size_t>(width)],
+                mapped.bits + (static_cast<size_t>(y) * mapped.pitch),
+                static_cast<size_t>(width) * sizeof(uint32_t));
+  }
+  readback->Unmap();
+  return out;
 }
 
 void Overlay::HandleMouseMove(HWND hwnd, POINT pt) {
@@ -357,15 +579,21 @@ void Overlay::HandleMouseMove(HWND hwnd, POINT pt) {
     // The chevron is a cell of the strip but not an icon: it highlights
     // without a tooltip and without a gesture to any owner.
     const bool onChevron = hasChevron_ && PtInRect(&chevronCell_, pt) != 0;
-    if (chevronHovered_ != onChevron) {
+    const bool changed = chevronHovered_ != onChevron;
+    if (changed) {
       chevronHovered_ = onChevron;
       dirty_ = true;
       Render();
     }
     if (hovered_ != kNoHover) {
       DispatchLeave();  // the pointer left the icon for the gap
+      ClearHover();
     }
-    ClearHover();
+    if (onChevron && changed) {
+      ArmHover();
+    } else if (!onChevron && tooltip_ != nullptr) {
+      tooltip_->Hide();
+    }
     return;
   }
   if (chevronHovered_) {
@@ -380,27 +608,55 @@ void Overlay::HandleMouseMove(HWND hwnd, POINT pt) {
     DispatchLeave();  // the pointer left the previously hovered cell
   }
   hovered_ = index;
+  if (tooltip_ != nullptr) {
+    tooltip_->Hide();
+  }
+  ArmHover();
   dirty_ = true;
   Render();
   if (index >= icons_.size()) {
     return;
   }
-  if (tooltip_ == nullptr) {
-    tooltip_ = Tooltip::Create(hwnd);
+  // The pointer entered this cell: v4 owners get NIN_POPUPOPEN (report 07).
+  DispatchGesture(TrayEvent::kMouseEnter, pt);
+}
+
+void Overlay::ShowHoveredTooltip() {
+  const bool chevron = chevronHovered_ && hasChevron_;
+  if (!chevron && (hovered_ >= icons_.size() || hovered_ >= cells_.size())) {
+    return;
   }
-  if (tooltip_ != nullptr && icons_[index].tip[0] != L'\0') {
+  if (tooltip_ == nullptr) {
+    tooltip_ = Tooltip::Create(hwnd_);
+  }
+  const std::wstring text = chevron ? L"Show hidden icons" : icons_[hovered_].tip;
+  if (tooltip_ != nullptr && !text.empty()) {
     // The tooltip places itself above the icon's screen rect (spec 6.4).
-    const RECT& cell = cells_[index];
+    const RECT& cell = chevron ? chevronCell_ : cells_[hovered_];
     const RECT iconRect = {.left = strip_.left + cell.left,
-                           .top = strip_.top + cell.top,
+                           .top = strip_.top,
                            .right = strip_.left + cell.right,
-                           .bottom = strip_.top + cell.bottom};
-    tooltip_->Show(icons_[index].tip, iconRect);
+                           .bottom = strip_.bottom};
+    tooltip_->Show(text, iconRect);
   } else if (tooltip_ != nullptr) {
     tooltip_->Hide();
   }
-  // The pointer entered this cell: v4 owners get NIN_POPUPOPEN (report 07).
-  DispatchGesture(TrayEvent::kMouseEnter, pt);
+}
+
+void Overlay::ArmHover() {
+  TRACKMOUSEEVENT track = {};
+  track.cbSize = sizeof(track);
+  track.dwFlags = TME_HOVER;
+  track.hwndTrack = hwnd_;
+  track.dwHoverTime = HOVER_DEFAULT;
+  TrackMouseEvent(&track);
+}
+
+RECT Overlay::FlyoutAnchor() const {
+  const SIZE button = TrayButtonSizeForDpi(GetDpiForWindow(hwnd_), metrics_);
+  return RECT{.left = strip_.left, .top = strip_.top,
+               .right = (std::min)(strip_.right, strip_.left + button.cx),
+               .bottom = strip_.bottom};
 }
 
 bool Overlay::HandleChevronClick(POINT pt) {
@@ -412,20 +668,25 @@ bool Overlay::HandleChevronClick(POINT pt) {
 }
 
 void Overlay::ToggleFlyout() {
-  if (flyout_ != nullptr) {
-    CloseFlyout();
+  if (flyout_ != nullptr && flyout_->hwnd() != nullptr) {
+    if (flyout_->IsClosing()) {
+      flyout_->Reopen();  // the chevron reverses the fade, not a new popup
+    } else {
+      flyout_->Close();
+    }
     return;
   }
+  flyout_.reset();
   if (overflow_.empty() || hwnd_ == nullptr) {
     return;
   }
   // The owner is told after the window is gone; the reset below happens
   // on the message loop, never inside the flyout's own handler.
-  flyout_ = Flyout::Create(monitor_, strip_, overflow_, onClick_, [this]() {
+  flyout_ = Flyout::Create(monitor_, FlyoutAnchor(), overflow_, onClick_, [this]() {
     if (hwnd_ != nullptr) {
       PostMessageW(hwnd_, kMsgFlyoutClosed, 0, 0);
     }
-  });
+  }, wic_.Get(), d2dDevice_.Get());
 }
 
 void Overlay::CloseFlyout() {
@@ -476,7 +737,6 @@ void Overlay::DispatchLeave() {
 }
 
 void Overlay::ClearHover() {
-  tracking_ = false;
   if (tooltip_ != nullptr) {
     tooltip_->Hide();
   }
@@ -502,15 +762,20 @@ bool HitTestIcon(const std::vector<RECT>& cells, POINT pt, size_t* index) {
   return false;
 }
 
-void Overlay::DrawIcons(ID2D1DeviceContext* dc, int width, int height) {
-  UINT dpi = GetDpiForWindow(hwnd_);
-  if (dpi == 0) {
+void Overlay::DrawIcons(ID2D1DeviceContext* dc, int width, int height,
+                        int dpiOverride) {
+  int dpi = dpiOverride;
+  if (dpi <= 0) {
+    dpi = static_cast<int>(GetDpiForWindow(hwnd_));
+  }
+  if (dpi <= 0) {
     dpi = 96;
   }
-  const int iconPx = IconPxForDpi(dpi);
-  const int gap = IconGapPxForDpi(dpi);
+  const int iconPx = IconPxForDpi(static_cast<UINT>(dpi));
+  const int pad = Px(metrics::kIconPad, dpi);
   const StripLayout layout =
-      LayoutStrip(width, height, iconPx, gap, icons_.size(), !overflow_.empty());
+      LayoutStrip(width, height, iconPx, pad, icons_.size(), !overflow_.empty(),
+                  TrayButtonSizeForDpi(static_cast<UINT>(dpi), metrics_));
   cells_ = layout.icons;
   hasChevron_ = layout.hasChevron;
   chevronCell_ = layout.chevron;
@@ -522,16 +787,23 @@ void Overlay::DrawIcons(ID2D1DeviceContext* dc, int width, int height) {
         D2D1::RectF(static_cast<float>(rect.left), static_cast<float>(rect.top),
                     static_cast<float>(rect.right),
                     static_cast<float>(rect.bottom));
+    // The cell is the whole tray button; the glyph is centred in it.
+    const int glyphLeft = rect.left + ((rect.right - rect.left - iconPx) / 2);
+    const int glyphTop = rect.top + ((rect.bottom - rect.top - iconPx) / 2);
+    const D2D1_RECT_F glyph = D2D1::RectF(
+        static_cast<float>(glyphLeft), static_cast<float>(glyphTop),
+        static_cast<float>(glyphLeft + iconPx), static_cast<float>(glyphTop + iconPx));
     ID2D1Bitmap* bitmap = cache_.Get(icon.icon, icon.serial, iconPx);
     live.insert(
         IconCacheKey{.icon = icon.icon, .serial = icon.serial, .px = iconPx});
     if (i == hovered_) {
-      DrawHighlight(dc, cell);
+      DrawHighlight(dc, cell, dpi);
     }
     if (bitmap != nullptr) {
-      dc->DrawBitmap(bitmap, cell, 1.0F, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+      dc->DrawBitmap(bitmap, glyph, 1.0F,
+                     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
     } else {
-      DrawPlaceholder(dc, cell);
+      DrawPlaceholder(dc, glyph);
     }
   }
   if (hasChevron_) {
@@ -541,7 +813,7 @@ void Overlay::DrawIcons(ID2D1DeviceContext* dc, int width, int height) {
         static_cast<float>(chevronCell_.right),
         static_cast<float>(chevronCell_.bottom));
     if (chevronHovered_) {
-      DrawHighlight(dc, cell);
+      DrawHighlight(dc, cell, dpi);
     }
     DrawChevron(dc, cell);
   }
@@ -549,39 +821,54 @@ void Overlay::DrawIcons(ID2D1DeviceContext* dc, int width, int height) {
 }
 
 void Overlay::DrawHighlight(ID2D1DeviceContext* dc,
-                            const D2D1_RECT_F& cell) const {
+                            const D2D1_RECT_F& cell, int dpi) const {
   Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
-  const D2D1_COLOR_F color =
-      dark_ ? D2D1_COLOR_F{.r = 1.0F, .g = 1.0F, .b = 1.0F, .a = 0.10F}
-            : D2D1_COLOR_F{.r = 0.0F, .g = 0.0F, .b = 0.0F, .a = 0.08F};
-  if (FAILED(dc->CreateSolidColorBrush(color, brush.GetAddressOf())) != 0 ||
+  const ThemeTokens tokens = ThemeTokens::Current(dark_);
+  if (FAILED(dc->CreateSolidColorBrush(tokens.hover, brush.GetAddressOf())) != 0 ||
       brush == nullptr) {
     return;
   }
-  dc->FillRoundedRectangle(D2D1::RoundedRect(cell, 4.0F, 4.0F), brush.Get());
+  const auto radius = static_cast<float>(Px(metrics::kControlCornerRadius, dpi));
+  const RECT button = {.left = static_cast<LONG>(cell.left),
+                       .top = static_cast<LONG>(cell.top),
+                       .right = static_cast<LONG>(cell.right),
+                       .bottom = static_cast<LONG>(cell.bottom)};
+  const RECT visual = HighlightBounds(button, dpi);
+  const D2D1_RECT_F inset = D2D1::RectF(static_cast<float>(visual.left),
+                                       static_cast<float>(visual.top),
+                                       static_cast<float>(visual.right),
+                                       static_cast<float>(visual.bottom));
+  dc->FillRoundedRectangle(D2D1::RoundedRect(inset, radius, radius), brush.Get());
 }
 
 void Overlay::DrawChevron(ID2D1DeviceContext* dc,
                           const D2D1_RECT_F& cell) const {
   Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
-  const D2D1_COLOR_F color =
-      dark_ ? D2D1_COLOR_F{.r = 0.95F, .g = 0.95F, .b = 0.95F, .a = 0.85F}
-            : D2D1_COLOR_F{.r = 0.10F, .g = 0.10F, .b = 0.10F, .a = 0.75F};
+  const D2D1_COLOR_F color = ThemeTokens::Current(dark_).text;
   if (FAILED(dc->CreateSolidColorBrush(color, brush.GetAddressOf())) != 0 ||
       brush == nullptr) {
     return;
   }
-  const float midX = (cell.left + cell.right) / 2.0F;
-  const float midY = (cell.top + cell.bottom) / 2.0F;
-  const float half = (cell.right - cell.left) / 4.0F;
-  const float tenth = (cell.right - cell.left) / 10.0F;
-  const float stroke = tenth > 1.0F ? tenth : 1.0F;
-  // A "^" pointing up: the flyout opens above the strip.
-  dc->DrawLine(D2D1::Point2F(midX - half, midY + (half / 2.0F)),
-               D2D1::Point2F(midX, midY - (half / 2.0F)), brush.Get(), stroke);
-  dc->DrawLine(D2D1::Point2F(midX, midY - (half / 2.0F)),
-               D2D1::Point2F(midX + half, midY + (half / 2.0F)), brush.Get(),
-               stroke);
+  if (dwrite_ == nullptr) {
+    return;
+  }
+  Microsoft::WRL::ComPtr<IDWriteTextFormat> format;
+  const float size = (cell.right - cell.left) * 0.375F;
+  if (FAILED(dwrite_->CreateTextFormat(
+          L"Segoe Fluent Icons", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+          DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, L"",
+          format.GetAddressOf()))) {
+    return;
+  }
+  format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+  format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+  dc->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+  Microsoft::WRL::ComPtr<IDWriteTextLayout> text;
+  if (SUCCEEDED(dwrite_->CreateTextLayout(
+          L"\uE70E", 1, format.Get(), cell.right - cell.left,
+          cell.bottom - cell.top, text.GetAddressOf()))) {
+    dc->DrawTextLayout(D2D1::Point2F(cell.left, cell.top), text.Get(), brush.Get());
+  }
 }
 
 void Overlay::DrawPlaceholder(ID2D1DeviceContext* dc,
@@ -596,70 +883,27 @@ void Overlay::DrawPlaceholder(ID2D1DeviceContext* dc,
 }
 
 ID2D1Bitmap* Overlay::IconBitmap(HICON icon, int px) const {
-  // An HICON becomes pixels through a 32-bpp DIB section; DrawIconEx
-  // gives straight alpha, and D2D wants premultiplied, so the buffer is
-  // premultiplied in place before the bitmap is created.
-  if (d2dContext_ == nullptr || icon == nullptr || px <= 0) {
+  // One conversion for the strip and the flyout (plan task 4). It
+  // premultiplies exactly once and does not resample an already-correct
+  // source; both matter for glyphs whose strokes land on half pixels.
+  if (d2dContext_ == nullptr || wic_ == nullptr || icon == nullptr || px <= 0) {
     return nullptr;
   }
-  BITMAPV5HEADER header = {};
-  header.bV5Size = sizeof(header);
-  header.bV5Width = px;
-  header.bV5Height = -px;  // top-down
-  header.bV5Planes = 1;
-  header.bV5BitCount = 32;
-  header.bV5Compression = BI_BITFIELDS;
-  header.bV5RedMask = 0x00FF0000U;
-  header.bV5GreenMask = 0x0000FF00U;
-  header.bV5BlueMask = 0x000000FFU;
-  header.bV5AlphaMask = 0xFF000000U;
-
-  const HDC screen = GetDC(nullptr);
-  if (screen == nullptr) {
+  RasterIcon raster;
+  if (!RasterizeIcon(wic_.Get(), icon, px, &raster)) {
     return nullptr;
   }
-  void* bits = nullptr;
-  const HBITMAP dib =
-      CreateDIBSection(screen, reinterpret_cast<BITMAPINFO*>(&header),
-                       DIB_RGB_COLORS, &bits, nullptr, 0);
-  const HDC memory = CreateCompatibleDC(screen);
-  HGDIOBJ previous = nullptr;
-  if (dib != nullptr && memory != nullptr && bits != nullptr) {
-    previous = SelectObject(memory, dib);
-    PatBlt(memory, 0, 0, px, px, BLACKNESS);
-    DrawIconEx(memory, 0, 0, icon, px, px, 0, nullptr, DI_NORMAL);
-  }
-  if (previous != nullptr) {
-    SelectObject(memory, previous);
-  }
-  if (memory != nullptr) {
-    DeleteDC(memory);
-  }
-  ReleaseDC(nullptr, screen);
-
+  const auto stride =
+      static_cast<UINT>(raster.width) * static_cast<UINT>(sizeof(uint32_t));
+  const D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
+      D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                        D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0F, 96.0F);
   Microsoft::WRL::ComPtr<ID2D1Bitmap> bitmap;
-  if (dib != nullptr && bits != nullptr) {
-    auto* pixels = static_cast<uint32_t*>(bits);
-    const int count = px * px;
-    for (int i = 0; i < count; ++i) {
-      const uint32_t argb = pixels[i];
-      const uint32_t alpha = argb >> 24;
-      const uint32_t red = ((argb >> 16) & 0xFFU) * alpha / 255U;
-      const uint32_t green = ((argb >> 8) & 0xFFU) * alpha / 255U;
-      const uint32_t blue = (argb & 0xFFU) * alpha / 255U;
-      pixels[i] = (alpha << 24) | (red << 16) | (green << 8) | blue;
-    }
-    const D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-                          D2D1_ALPHA_MODE_PREMULTIPLIED));
-    const auto size = static_cast<UINT32>(px);
-    const HRESULT hr = d2dContext_->CreateBitmap(
-        D2D1::SizeU(size, size), pixels, size * 4U, &props,
-        bitmap.GetAddressOf());
-    if (FAILED(hr) != 0) {
-      bitmap.Reset();
-    }
-    DeleteObject(dib);
+  if (FAILED(d2dContext_->CreateBitmap(
+          D2D1::SizeU(static_cast<UINT>(raster.width),
+                      static_cast<UINT>(raster.height)),
+          raster.pixels.data(), stride, &props, bitmap.GetAddressOf()))) {
+    return nullptr;
   }
   return bitmap.Detach();
 }

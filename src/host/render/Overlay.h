@@ -9,6 +9,7 @@
 #include "render/IconCache.h"
 #include "render/IconView.h"
 #include "render/Tooltip.h"
+#include "win/Monitors.h"
 
 #include <windows.h>
 
@@ -17,9 +18,12 @@
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <wrl/client.h>
+#include <wincodec.h>
+#include <dwrite.h>
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -37,12 +41,16 @@ class Overlay {
   static std::unique_ptr<Overlay> Create(
       HMONITOR monitor, const RECT& strip,
       std::function<void()> onGeometryInvalidated = {},
-      DispatchClick onClick = {});
+      DispatchClick onClick = {}, TrayMetrics metrics = {}, HWND taskbarOwner = nullptr);
   ~Overlay();
   Overlay(const Overlay&) = delete;
   Overlay& operator=(const Overlay&) = delete;
 
   [[nodiscard]] HWND hwnd() const noexcept { return hwnd_; }
+  [[nodiscard]] HMONITOR monitor() const noexcept { return monitor_; }
+  bool Reposition(const RECT& strip, TrayMetrics metrics);
+  void SetGeometrySafe(bool safe);
+  void RefreshVisibility();
   // Replaces the icon list; marks the strip dirty. HICONs are borrowed.
   // `overflow` are the icons the strip does not show: when it is not
   // empty the strip draws a chevron that opens the flyout (spec 6.4).
@@ -50,6 +58,21 @@ class Overlay {
                 std::vector<IconView> overflow = {});
   // Redraws only when dirty (spec 6.2: no timer, no polling).
   void Render();
+
+  // A read-back of what the strip draws, in 0xAARRGGBB, row-major. This
+  // is the test hook for the visual spec (spec 6.3): the same drawing
+  // path, rendered into an offscreen target at `dpi` instead of the
+  // composition surface. Empty when composition is unavailable.
+  struct Bitmap {
+    int width = 0;
+    int height = 0;
+    std::vector<uint32_t> pixels;
+    [[nodiscard]] uint32_t At(int x, int y) const {
+      return pixels[(static_cast<size_t>(y) * static_cast<size_t>(width)) +
+                    static_cast<size_t>(x)];
+    }
+  };
+  [[nodiscard]] std::optional<Bitmap> RenderToBitmap(int dpi, bool dark);
 
  private:
   Overlay() = default;
@@ -62,13 +85,17 @@ class Overlay {
   bool InitComposition();
   void ReleaseComposition();
   void ApplyTheme();
-  void DrawIcons(ID2D1DeviceContext* dc, int width, int height);
+  // `dpi` of 0 means the window's DPI; the bitmap path passes one.
+  void DrawIcons(ID2D1DeviceContext* dc, int width, int height, int dpi = 0);
   [[nodiscard]] ID2D1Bitmap* IconBitmap(HICON icon, int px) const;
   static void DrawPlaceholder(ID2D1DeviceContext* dc, const D2D1_RECT_F& cell);
   void DrawHighlight(ID2D1DeviceContext* dc,
-                     const D2D1_RECT_F& cell) const;
+                     const D2D1_RECT_F& cell, int dpi) const;
   void DrawChevron(ID2D1DeviceContext* dc, const D2D1_RECT_F& cell) const;
   void HandleMouseMove(HWND hwnd, POINT pt);
+  void ShowHoveredTooltip();
+  void ArmHover();
+  [[nodiscard]] RECT FlyoutAnchor() const;
   // True when the click landed on the chevron and was consumed.
   bool HandleChevronClick(POINT pt);
   void ToggleFlyout();
@@ -82,7 +109,10 @@ class Overlay {
   HWND hwnd_ = nullptr;
   HMONITOR monitor_ = nullptr;
   RECT strip_ = {};
+  TrayMetrics metrics_;
+  bool ownsComApartment_ = false;
   bool dirty_ = true;
+  bool geometrySafe_ = true;
   bool dark_ = false;
   bool tracking_ = false;
   size_t hovered_ = kNoHover;
@@ -101,6 +131,8 @@ class Overlay {
   IconCache cache_{[this](HICON icon, int px) { return IconBitmap(icon, px); }};
 
   Microsoft::WRL::ComPtr<ID3D11Device> d3d_;
+  Microsoft::WRL::ComPtr<IWICImagingFactory> wic_;
+  Microsoft::WRL::ComPtr<IDWriteFactory> dwrite_;
   Microsoft::WRL::ComPtr<ID2D1Factory1> d2dFactory_;
   Microsoft::WRL::ComPtr<ID2D1Device> d2dDevice_;
   Microsoft::WRL::ComPtr<ID2D1DeviceContext> d2dContext_;
