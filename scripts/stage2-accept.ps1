@@ -227,10 +227,12 @@ if ($nimLines.Count -lt 6) {
 # --- (4) click checklist (owner) -------------------------------------------
 
 Write-Log "phase 4: click checklist (host for $($ClickWaitSec + 30) s)"
-Write-Log 'Owner, please use the icon "s2-click" that the script is about to create on the overlay:'
+Write-Log 'Owner: the script creates an icon named "s2-click" on the overlay strip in about 2 seconds.'
+Write-Log 'It is the LEFTMOST icon on the secondary monitor strip (the row just left of the clock).'
+Write-Log 'Hover it to confirm the tooltip "s2-click", then:'
 Write-Log '  1) left-click it twice with a pause between the clicks'
 Write-Log '  2) double-click it'
-Write-Log '  3) right-click it (a context menu should open, if the emulator had one)'
+Write-Log '  3) right-click it'
 Write-Log '  4) hover it (the tooltip must show "s2-click")'
 $hostProc = Start-Process -FilePath $HostExe -ArgumentList '--duration', "$($ClickWaitSec + 30)" -PassThru
 Start-Sleep -Seconds 2
@@ -278,7 +280,8 @@ $hostProc = Start-Process -FilePath $HostExe -ArgumentList '--duration', '60' -P
 Start-Sleep -Seconds 2
 $hangJob = Start-Process -FilePath $Emu64 -ArgumentList 'add', '--tip', 'TRAYHANG', '--dur', '60000', '--hang', '20000' -PassThru
 Start-Sleep -Seconds 2
-Write-Log 'Owner: while TRAYHANG is hung, click its overlay icon (once is enough)'
+Write-Log 'Owner: while TRAYHANG is hung, click its overlay icon once'
+Write-Log 'TRAYHANG is the LEFTMOST icon on the secondary monitor strip; hover it to confirm the tooltip'
 Write-Log 'the overlay must stay responsive: the script now measures WM_NULL reply time'
 
 $responsive = $false
