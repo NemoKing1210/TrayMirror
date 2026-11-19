@@ -50,6 +50,7 @@ bool Overlay::EnsureClass() {
   static const bool registered = []() {
     WNDCLASSEXW wc = {};
     wc.cbSize = sizeof(wc);
+    wc.style = CS_DBLCLKS;  // without it WM_LBUTTONDBLCLK never arrives
     wc.lpfnWndProc = &Overlay::WndProc;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.lpszClassName = kOverlayClass;
@@ -86,11 +87,39 @@ LRESULT Overlay::HandleMessage(HWND hwnd, UINT message, WPARAM wparam,
     case WM_PAINT:
       ValidateRect(hwnd, nullptr);
       return 0;
-    case WM_MOUSEMOVE:
-      HandleMouseMove(
-          hwnd, POINT{.x = GET_X_LPARAM(lparam), .y = GET_Y_LPARAM(lparam)});
+    case WM_MOUSEMOVE: {
+      const POINT pt = {.x = GET_X_LPARAM(lparam), .y = GET_Y_LPARAM(lparam)};
+      HandleMouseMove(hwnd, pt);
+      DispatchGesture(TrayEvent::kMouseMove, pt);
+      return 0;
+    }
+    case WM_LBUTTONDOWN:
+      DispatchGesture(TrayEvent::kLeftDown,
+                      POINT{.x = GET_X_LPARAM(lparam),
+                            .y = GET_Y_LPARAM(lparam)});
+      return 0;
+    case WM_LBUTTONUP:
+      DispatchGesture(TrayEvent::kLeftUp,
+                      POINT{.x = GET_X_LPARAM(lparam),
+                            .y = GET_Y_LPARAM(lparam)});
+      return 0;
+    case WM_LBUTTONDBLCLK:
+      DispatchGesture(TrayEvent::kLeftDblClk,
+                      POINT{.x = GET_X_LPARAM(lparam),
+                            .y = GET_Y_LPARAM(lparam)});
+      return 0;
+    case WM_RBUTTONDOWN:
+      DispatchGesture(TrayEvent::kRightDown,
+                      POINT{.x = GET_X_LPARAM(lparam),
+                            .y = GET_Y_LPARAM(lparam)});
+      return 0;
+    case WM_RBUTTONUP:
+      DispatchGesture(TrayEvent::kRightUp,
+                      POINT{.x = GET_X_LPARAM(lparam),
+                            .y = GET_Y_LPARAM(lparam)});
       return 0;
     case WM_MOUSELEAVE:
+      DispatchLeave();
       ClearHover();
       return 0;
     case WM_SETTINGCHANGE:
@@ -113,7 +142,7 @@ LRESULT Overlay::HandleMessage(HWND hwnd, UINT message, WPARAM wparam,
 
 std::unique_ptr<Overlay> Overlay::Create(
     HMONITOR monitor, const RECT& strip,
-    std::function<void()> onGeometryInvalidated) {
+    std::function<void()> onGeometryInvalidated, DispatchClick onClick) {
   auto log = InitHostLogging("");
   const int width = strip.right - strip.left;
   const int height = strip.bottom - strip.top;
@@ -131,6 +160,7 @@ std::unique_ptr<Overlay> Overlay::Create(
   overlay->monitor_ = monitor;
   overlay->strip_ = strip;
   overlay->onGeometryInvalidated_ = std::move(onGeometryInvalidated);
+  overlay->onClick_ = std::move(onClick);
 
   const HWND hwnd = CreateWindowExW(
       WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST, kOverlayClass,
@@ -329,6 +359,42 @@ void Overlay::HandleMouseMove(HWND hwnd, POINT pt) {
   } else if (tooltip_ != nullptr) {
     tooltip_->Hide();
   }
+}
+
+void Overlay::DispatchGesture(TrayEvent event, POINT pt) {
+  if (!onClick_) {
+    return;
+  }
+  size_t index = kNoHover;
+  if (!HitTestIcon(cells_, pt, &index) || index >= icons_.size()) {
+    return;
+  }
+  const DispatchTarget& target = icons_[index].target;
+  if (target.owner == nullptr) {
+    return;
+  }
+  onClick_(DispatchCall{
+      .target = target,
+      .event = event,
+      .screenPos = POINT{.x = strip_.left + pt.x, .y = strip_.top + pt.y}});
+}
+
+void Overlay::DispatchLeave() {
+  if (!onClick_ || hovered_ >= icons_.size() || hovered_ >= cells_.size()) {
+    return;
+  }
+  const DispatchTarget& target = icons_[hovered_].target;
+  if (target.owner == nullptr) {
+    return;
+  }
+  const RECT& cell = cells_[hovered_];
+  onClick_(DispatchCall{
+      .target = target,
+      .event = TrayEvent::kMouseLeave,
+      .screenPos = POINT{.x = strip_.left + cell.left +
+                              ((cell.right - cell.left) / 2),
+                         .y = strip_.top + cell.top +
+                              ((cell.bottom - cell.top) / 2)}});
 }
 
 void Overlay::ClearHover() {

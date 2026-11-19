@@ -10,6 +10,7 @@
 #include "core/InitialSync.h"
 #include "core/ModelInbox.h"
 #include "core/TrayModel.h"
+#include "dispatch/Dispatch.h"
 #include "render/OverlayThread.h"
 #include "ipc/SharedRing.h"
 #include "ipc/SingleInstance.h"
@@ -444,7 +445,20 @@ int HostAppRun(const HostAppConfig& config) {
   traymirror::TrayModel model;
   traymirror::ModelInbox inbox;
   traymirror::OverlayThread overlay;
-  if (!overlay.Start(&inbox, &model)) {
+  // Every gesture on a mirrored icon is replayed to its owner by the
+  // dispatcher; the log line is what the acceptance runbook checks.
+  const traymirror::DispatchSender dispatchBase =
+      traymirror::DefaultDispatchSender();
+  const traymirror::DispatchSender dispatchSender =
+      [&log, dispatchBase](const traymirror::DispatchCall& call) {
+        log->debug("dispatch: event={} uid={} owner={:#x}",
+                   static_cast<int>(call.event), call.target.uid,
+                   reinterpret_cast<unsigned long long>(call.target.owner));
+        dispatchBase(call);
+      };
+  if (!overlay.Start(&inbox, &model,
+                     traymirror::DefaultEnumerateSecondaryMonitors,
+                     dispatchSender)) {
     log->error("overlay thread failed to start — model-only session");
   }
 

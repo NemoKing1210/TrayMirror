@@ -94,13 +94,14 @@ LRESULT OverlayThread::HandleUiMessage(HWND hwnd, UINT message, WPARAM wparam,
 OverlayThread::~OverlayThread() { Stop(); }
 
 bool OverlayThread::Start(ModelInbox* inbox, TrayModel* model,
-                          MonitorEnumerator enumerate) {
+                          MonitorEnumerator enumerate, DispatchSender sender) {
   if (thread_.joinable()) {
     return false;
   }
   inbox_ = inbox;
   model_ = model;
   enumerate_ = std::move(enumerate);
+  sender_ = std::move(sender);
   ready_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
   if (ready_ == nullptr) {
     return false;
@@ -134,6 +135,8 @@ void OverlayThread::Run() {
     return;
   }
   uiHwnd_.store(hwnd);
+  dispatcher_ = std::make_unique<Dispatcher>(
+      sender_ != nullptr ? std::move(sender_) : DefaultDispatchSender());
   BuildOverlays();
   if (inbox_ != nullptr) {
     inbox_->SetNudge(hwnd, kMsgInbox);
@@ -148,6 +151,7 @@ void OverlayThread::Run() {
     DispatchMessageW(&msg);
   }
   overlays_.clear();
+  dispatcher_.reset();
   uiHwnd_.store(nullptr);
 }
 
@@ -180,11 +184,14 @@ void OverlayThread::BuildOverlays() {
     if (strip.right <= strip.left) {
       continue;
     }
-    auto overlay = Overlay::Create(mt.monitor, strip, [ui]() {
-      if (ui != nullptr) {
-        PostMessageW(ui, kMsgRebuild, 0, 0);
-      }
-    });
+    auto overlay = Overlay::Create(
+        mt.monitor, strip,
+        [ui]() {
+          if (ui != nullptr) {
+            PostMessageW(ui, kMsgRebuild, 0, 0);
+          }
+        },
+        [this](const DispatchCall& call) { PostGesture(call); });
     if (overlay != nullptr) {
       overlays_.push_back(std::move(overlay));
     }
@@ -207,6 +214,12 @@ void OverlayThread::ApplyInbox() {
   }
 }
 
+void OverlayThread::PostGesture(const DispatchCall& call) {
+  if (dispatcher_ != nullptr) {
+    dispatcher_->Post(call);
+  }
+}
+
 void OverlayThread::PushModelToOverlays() {
   if (model_ == nullptr || overlays_.empty()) {
     return;
@@ -217,9 +230,15 @@ void OverlayThread::PushModelToOverlays() {
     if (icon.hidden()) {
       continue;
     }
-    icons.push_back(IconView{.icon = icon.iconCopy,
-                             .serial = icon.iconSerial,
-                             .tip = icon.tip});
+    icons.push_back(
+        IconView{.icon = icon.iconCopy,
+                 .serial = icon.iconSerial,
+                 .tip = icon.tip,
+                 .target = DispatchTarget{.owner = icon.ownerHwnd,
+                                          .callbackMessage = icon.callbackMessage,
+                                          .uid = icon.key.uid,
+                                          .version = icon.version,
+                                          .ownerPid = icon.ownerPid}});
   }
   for (const std::unique_ptr<Overlay>& overlay : overlays_) {
     overlay->SetIcons(icons);

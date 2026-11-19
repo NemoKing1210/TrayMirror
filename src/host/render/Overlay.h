@@ -4,6 +4,7 @@
 // the overlay thread; the model stays off this type.
 #pragma once
 
+#include "dispatch/Dispatch.h"
 #include "render/IconCache.h"
 #include "render/Tooltip.h"
 
@@ -28,7 +29,12 @@ struct IconView {
   HICON icon = nullptr;
   UINT serial = 0;
   std::wstring tip;
+  DispatchTarget target;  // where clicks on this icon are replayed
 };
+
+// Where a click on a mirrored icon goes; the overlay never contacts the
+// owner itself (spec 4.4).
+using DispatchClick = std::function<void(const DispatchCall&)>;
 
 // Strip-local hit test over the drawn cells; true and the cell index on
 // a hit (the gap between cells is not a hit).
@@ -38,9 +44,11 @@ class Overlay {
  public:
   // `onGeometryInvalidated` runs on the overlay thread when the window
   // must be rebuilt (DPI change); it must only post, never rebuild here.
+  // `onClick` receives gestures on the drawn cells, in screen coordinates.
   static std::unique_ptr<Overlay> Create(
       HMONITOR monitor, const RECT& strip,
-      std::function<void()> onGeometryInvalidated = {});
+      std::function<void()> onGeometryInvalidated = {},
+      DispatchClick onClick = {});
   ~Overlay();
   Overlay(const Overlay&) = delete;
   Overlay& operator=(const Overlay&) = delete;
@@ -68,6 +76,8 @@ class Overlay {
   void DrawHighlight(ID2D1DeviceContext* dc,
                      const D2D1_RECT_F& cell) const;
   void HandleMouseMove(HWND hwnd, POINT pt);
+  void DispatchGesture(TrayEvent event, POINT pt);
+  void DispatchLeave();
   void ClearHover();
 
   static constexpr size_t kNoHover = static_cast<size_t>(-1);
@@ -83,6 +93,7 @@ class Overlay {
   std::vector<IconView> icons_;
   std::vector<RECT> cells_;  // strip-local, one per drawn icon (hit-testing)
   std::function<void()> onGeometryInvalidated_;
+  DispatchClick onClick_;
   IconCache cache_{[this](HICON icon, int px) { return IconBitmap(icon, px); }};
 
   Microsoft::WRL::ComPtr<ID3D11Device> d3d_;

@@ -28,6 +28,7 @@ struct Options {
   int count = 1;
   UINT id = 1;
   DWORD durMs = 5000;
+  DWORD hangMs = 0;  // stop pumping for this long after registering (S4 acceptance)
   bool v4 = false;
   bool hidden = false;
   bool guid = false;
@@ -303,6 +304,7 @@ void PrintUsage() {
       "  --count N      icons uid 1..N (add mode, default 1)\n"
       "  --id N         uid for modify/delete/balloon/setversion (default 1)\n"
       "  --dur ms       run duration, default 5000\n"
+      "  --hang ms      after registering the icon, stop pumping for this long\n"
       "  --v4           NIM_SETVERSION NOTIFYICON_VERSION_4 after ADD\n"
       "  --hidden       NIF_STATE NIS_HIDDEN\n"
       "  --guid         NIF_GUID with the fixed marker GUID (payload measurement)\n"
@@ -327,6 +329,7 @@ bool ParseOptions(int argc, wchar_t** argv, Options* o) {
     else if (a == L"--count" && i + 1 < argc) o->count = wcstol(argv[++i], nullptr, 10);
     else if (a == L"--id" && i + 1 < argc) o->id = static_cast<UINT>(wcstoul(argv[++i], nullptr, 10));
     else if (a == L"--dur" && i + 1 < argc) o->durMs = static_cast<DWORD>(wcstoul(argv[++i], nullptr, 10));
+    else if (a == L"--hang" && i + 1 < argc) o->hangMs = static_cast<DWORD>(wcstoul(argv[++i], nullptr, 10));
     else if (a == L"--v4") o->v4 = true;
     else if (a == L"--hidden") o->hidden = true;
     else if (a == L"--guid") o->guid = true;
@@ -402,6 +405,15 @@ int wmain(int argc, wchar_t** argv) {
       break;
     default:
       break;
+  }
+
+  // Hung-owner tool: with an icon registered, stop pumping so the shell
+  // (and the mirror host) must not block on this process.
+  if (o.hangMs > 0) {
+    EmuLogf(L"HANG begin ms=%u", o.hangMs);
+    std::printf("HANG %lu ms\n", o.hangMs);
+    Sleep(o.hangMs);
+    EmuLogf(L"HANG end");
   }
 
   Pump(o.durMs, hActionTimer);

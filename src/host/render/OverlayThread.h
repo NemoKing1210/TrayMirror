@@ -5,6 +5,7 @@
 
 #include "core/ModelInbox.h"
 #include "core/TrayModel.h"
+#include "dispatch/Dispatch.h"
 #include "render/Overlay.h"
 #include "win/Monitors.h"
 
@@ -29,9 +30,11 @@ class OverlayThread {
 
   // Starts the UI thread and returns once the message window exists
   // (uiHwnd() is valid on return). False when the window could not be
-  // created; in that case nothing is running.
+  // created; in that case nothing is running. `sender` carries every
+  // gesture on a mirrored icon off the UI thread (spec 4.4).
   bool Start(ModelInbox* inbox, TrayModel* model,
-             MonitorEnumerator enumerate = DefaultEnumerateSecondaryMonitors);
+             MonitorEnumerator enumerate = DefaultEnumerateSecondaryMonitors,
+             DispatchSender sender = {});
   void Stop();
   [[nodiscard]] HWND uiHwnd() const noexcept { return uiHwnd_.load(); }
 
@@ -40,6 +43,7 @@ class OverlayThread {
   void BuildOverlays();
   void ApplyInbox();
   void PushModelToOverlays();
+  void PostGesture(const DispatchCall& call);
 
   static bool EnsureUiClass();
   static LRESULT CALLBACK UiProc(HWND hwnd, UINT message, WPARAM wparam,
@@ -54,6 +58,9 @@ class OverlayThread {
   ModelInbox* inbox_ = nullptr;
   TrayModel* model_ = nullptr;
   MonitorEnumerator enumerate_;
+  DispatchSender sender_;
+  // Created on the UI thread once the sender is known; destroyed with it.
+  std::unique_ptr<Dispatcher> dispatcher_;
   std::vector<std::unique_ptr<Overlay>> overlays_;
 };
 
