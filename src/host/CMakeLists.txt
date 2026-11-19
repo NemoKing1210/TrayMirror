@@ -8,6 +8,7 @@ add_library(traymirror_host STATIC
             ipc/SharedRing.cpp ipc/SingleInstance.cpp
             HookInstall.cpp ReaderThread.cpp Log.cpp HostApp.cpp
             core/TrayModel.cpp core/InitialSync.cpp core/ModelInbox.cpp
+            core/PromotionStore.cpp
             dispatch/Dispatch.cpp
             win/Monitors.cpp
             render/Overlay.cpp render/OverlayThread.cpp
@@ -17,7 +18,8 @@ target_link_libraries(traymirror_host
                       PUBLIC traymirror_proto
                       PRIVATE spdlog::spdlog Threads::Threads
                               uiautomationcore ole32 oleaut32
-                              d2d1 dcomp d3d11 dxgi dwmapi shcore comctl32)
+                              d2d1 dcomp d3d11 dxgi dwmapi shcore comctl32
+                              advapi32)
 
 add_executable(TrayMirror main.cpp)
 target_link_libraries(TrayMirror PRIVATE traymirror_host)

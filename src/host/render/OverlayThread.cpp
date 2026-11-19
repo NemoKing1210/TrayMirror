@@ -32,6 +32,24 @@ UINT DpiForMonitor(HMONITOR monitor) {
   return dpiX;
 }
 
+// RAII around the promotion store key: the read must not leak it when
+// the model is rebuilt in between.
+class ScopedRegKey {
+ public:
+  explicit ScopedRegKey(HKEY key) : key_(key) {}
+  ~ScopedRegKey() {
+    if (key_ != nullptr) {
+      RegCloseKey(key_);
+    }
+  }
+  ScopedRegKey(const ScopedRegKey&) = delete;
+  ScopedRegKey& operator=(const ScopedRegKey&) = delete;
+  [[nodiscard]] HKEY key() const noexcept { return key_; }
+
+ private:
+  HKEY key_;
+};
+
 }  // namespace
 
 bool OverlayThread::EnsureUiClass() {
@@ -75,6 +93,11 @@ LRESULT OverlayThread::HandleUiMessage(HWND hwnd, UINT message, WPARAM wparam,
     case kMsgRebuild:
       BuildOverlays();
       return 0;
+    case kMsgPromotion:
+      if (ApplyPromotionFromStore()) {
+        PushModelToOverlays();
+      }
+      return 0;
     case WM_DISPLAYCHANGE:
       // Posted, not handled inline: rebuilding windows inside the
       // broadcast is legal but slow for every other window's sender.
@@ -95,7 +118,8 @@ LRESULT OverlayThread::HandleUiMessage(HWND hwnd, UINT message, WPARAM wparam,
 OverlayThread::~OverlayThread() { Stop(); }
 
 bool OverlayThread::Start(ModelInbox* inbox, TrayModel* model,
-                          MonitorEnumerator enumerate, DispatchSender sender) {
+                          MonitorEnumerator enumerate, DispatchSender sender,
+                          PromotionWatcher::KeyOpener promotion) {
   if (thread_.joinable()) {
     return false;
   }
@@ -103,6 +127,7 @@ bool OverlayThread::Start(ModelInbox* inbox, TrayModel* model,
   model_ = model;
   enumerate_ = std::move(enumerate);
   sender_ = std::move(sender);
+  promotion_ = std::move(promotion);
   ready_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
   if (ready_ == nullptr) {
     return false;
@@ -138,6 +163,13 @@ void OverlayThread::Run() {
   uiHwnd_.store(hwnd);
   dispatcher_ = std::make_unique<Dispatcher>(
       sender_ != nullptr ? std::move(sender_) : DefaultDispatchSender());
+  if (promotion_ != nullptr) {
+    watcher_ = std::make_unique<PromotionWatcher>(promotion_);
+    if (!watcher_->Start(hwnd, kMsgPromotion)) {
+      log->info("promotion store unavailable; every icon stays on the strip");
+      watcher_.reset();
+    }
+  }
   BuildOverlays();
   if (inbox_ != nullptr) {
     inbox_->SetNudge(hwnd, kMsgInbox);
@@ -152,6 +184,8 @@ void OverlayThread::Run() {
     DispatchMessageW(&msg);
   }
   overlays_.clear();
+  // Stop the registry thread before the window it posts to disappears.
+  watcher_.reset();
   dispatcher_.reset();
   uiHwnd_.store(nullptr);
 }
@@ -221,9 +255,30 @@ void OverlayThread::ApplyInbox() {
       changed = true;
     }
   }
+  // A new icon needs its registry entry read; a modify of an existing
+  // one does not (only the watcher can change it). Reading the whole
+  // store per record would re-enumerate the key on every tooltip update.
+  if (model_->icons().size() != promotionIconCount_) {
+    changed = ApplyPromotionFromStore() || changed;
+  }
   if (changed) {
     PushModelToOverlays();
   }
+}
+
+bool OverlayThread::ApplyPromotionFromStore() {
+  if (model_ == nullptr) {
+    return false;
+  }
+  promotionIconCount_ = model_->icons().size();
+  if (promotion_ == nullptr) {
+    return false;  // no store wired (tests): every icon stays promoted
+  }
+  const ScopedRegKey settings(promotion_());
+  if (settings.key() == nullptr) {
+    return false;  // no store: every icon stays promoted (spec 4.5)
+  }
+  return ApplyPromotion(model_, ReadNotifyIconSettings(settings.key()));
 }
 
 void OverlayThread::PostGesture(const DispatchCall& call) {

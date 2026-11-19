@@ -40,6 +40,10 @@ using traymirror::OverlayThread;
 using traymirror::TrayEvent;
 using traymirror::TrayModel;
 
+// The promotion store is user state: the integration tests open nothing,
+// so the strip contents depend only on the model they push.
+HKEY NoPromotionStore() { return nullptr; }
+
 // The system tooltip window is a top-level window of class
 // tooltips_class32 owned by the overlay. Found by enumeration so the
 // test never depends on the tooltip's own internals.
@@ -328,7 +332,7 @@ TEST(OverlaySmoke, UiWindowExistsWhileRunning) {  auto enumerate = []() {
   ModelInbox inbox;
   TrayModel model;
   OverlayThread thread;
-  ASSERT_TRUE(thread.Start(&inbox, &model, enumerate));
+  ASSERT_TRUE(thread.Start(&inbox, &model, enumerate, {}, NoPromotionStore));
 
   const HWND ui = thread.uiHwnd();
   ASSERT_NE(ui, nullptr);
@@ -449,7 +453,7 @@ TEST(OverlayStrip, GrowsToShowEveryVisibleIcon) {
   ModelInbox inbox;
   TrayModel model;
   OverlayThread thread;
-  ASSERT_TRUE(thread.Start(&inbox, &model, enumerate));
+  ASSERT_TRUE(thread.Start(&inbox, &model, enumerate, {}, NoPromotionStore));
 
   const int before = OverlayWidth();
   ASSERT_GT(before, 0);
@@ -477,7 +481,7 @@ TEST(OverlayStrip, NewestIconIsLeftmost) {
   ModelInbox inbox;
   TrayModel model;
   OverlayThread thread;
-  ASSERT_TRUE(thread.Start(&inbox, &model, enumerate));
+  ASSERT_TRUE(thread.Start(&inbox, &model, enumerate, {}, NoPromotionStore));
 
   inbox.Push(MakeAdd(1, L"first"));
   inbox.Push(MakeAdd(2, L"second"));
@@ -556,4 +560,138 @@ TEST(OverlayClick, EnterAndLeaveEmitPopupEvents) {
   ASSERT_GE(calls.size(), 4U);
   EXPECT_EQ(calls[0].target.owner, reinterpret_cast<HWND>(0x1234));
   EXPECT_EQ(calls[3].target.owner, reinterpret_cast<HWND>(0x5678));
+}
+
+// ---------------------------------------------------------------------
+// Registry promotion (spec 4.5) against a scratch key under HKCU: the
+// real store is never read by a test.
+// ---------------------------------------------------------------------
+
+namespace {
+
+constexpr wchar_t kPromotionScratch[] =
+    L"Software\\TrayMirrorTests\\OverlayPromotion";
+// The live store keeps one subkey per icon; the reader enumerates them.
+constexpr wchar_t kPromotionEntry[] =
+    L"Software\\TrayMirrorTests\\OverlayPromotion\\1";
+
+void WritePromotionEntry(DWORD promoted) {
+  HKEY key = nullptr;
+  ASSERT_EQ(RegCreateKeyExW(HKEY_CURRENT_USER, kPromotionEntry, 0, nullptr, 0,
+                            KEY_ALL_ACCESS, nullptr, &key, nullptr),
+            ERROR_SUCCESS);
+  wchar_t exe[MAX_PATH] = {};
+  ASSERT_NE(GetModuleFileNameW(nullptr, exe, MAX_PATH), 0U);
+  ASSERT_EQ(RegSetValueExW(key, L"ExecutablePath", 0, REG_SZ,
+                           reinterpret_cast<const BYTE*>(exe),
+                           static_cast<DWORD>((wcslen(exe) + 1) *
+                                              sizeof(wchar_t))),
+            ERROR_SUCCESS);
+  constexpr DWORD kUid = 1;
+  ASSERT_EQ(RegSetValueExW(key, L"UID", 0, REG_DWORD,
+                           reinterpret_cast<const BYTE*>(&kUid),
+                           sizeof(kUid)),
+            ERROR_SUCCESS);
+  ASSERT_EQ(RegSetValueExW(key, L"IsPromoted", 0, REG_DWORD,
+                           reinterpret_cast<const BYTE*>(&promoted),
+                           sizeof(promoted)),
+            ERROR_SUCCESS);
+  RegCloseKey(key);
+}
+
+HKEY OpenPromotionScratch() {
+  HKEY key = nullptr;
+  if (RegOpenKeyExW(HKEY_CURRENT_USER, kPromotionScratch, 0, KEY_READ, &key) !=
+      ERROR_SUCCESS) {
+    return nullptr;
+  }
+  return key;
+}
+
+// A real window in this process: the model resolves an icon's executable
+// from its owner, and the promotion store matches on that path.
+HWND CreateOwnerWindow() {
+  constexpr wchar_t kClass[] = L"TrayMirrorOverlayPromotionOwner";
+  WNDCLASSEXW wc = {};
+  wc.cbSize = sizeof(wc);
+  wc.lpfnWndProc = DefWindowProcW;
+  wc.hInstance = GetModuleHandleW(nullptr);
+  wc.lpszClassName = kClass;
+  RegisterClassExW(&wc);
+  return CreateWindowExW(0, kClass, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr,
+                         wc.hInstance, nullptr);
+}
+
+TrayMessage MakeAddFor(HWND owner, uint32_t uid, const wchar_t* tip) {
+  TrayMessage msg = MakeAdd(uid, tip);
+  msg.hwnd = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(owner));
+  return msg;
+}
+
+}  // namespace
+
+// A new icon whose store entry says "hidden" must leave the strip. The
+// store is applied while the record is drained; Stop() joins the UI
+// thread, so the model can be read afterwards without a data race.
+TEST(OverlayPromotion, StoreMovesIconOffTheStripOnModelChange) {
+  RegDeleteTreeW(HKEY_CURRENT_USER, kPromotionScratch);
+  WritePromotionEntry(0);
+  const HWND owner = CreateOwnerWindow();
+  ASSERT_NE(owner, nullptr);
+
+  auto enumerate = []() {
+    return std::vector<MonitorTaskbar>{SyntheticTaskbar()};
+  };
+  ModelInbox inbox;
+  TrayModel model;
+  OverlayThread thread;
+  ASSERT_TRUE(thread.Start(&inbox, &model, enumerate, {},
+                           OpenPromotionScratch));
+
+  inbox.Push(MakeAddFor(owner, 1, L"hidden by the store"));
+  thread.Stop();
+
+  ASSERT_EQ(model.icons().size(), 1U);
+  EXPECT_FALSE(model.icons()[0].promoted);
+
+  DestroyWindow(owner);
+  RegDeleteTreeW(HKEY_CURRENT_USER, kPromotionScratch);
+}
+
+// The watcher's message is what the UI thread acts on when the user
+// toggles an icon in Settings while the host is running: the icon must
+// leave the strip without any model change to trigger the read. The
+// store starts promoted and flips to hidden, so a wiring that never
+// re-reads leaves `promoted` at true and the test fails.
+TEST(OverlayPromotion, WatcherMessageReappliesTheStore) {
+  RegDeleteTreeW(HKEY_CURRENT_USER, kPromotionScratch);
+  WritePromotionEntry(1);
+  const HWND owner = CreateOwnerWindow();
+  ASSERT_NE(owner, nullptr);
+
+  auto enumerate = []() {
+    return std::vector<MonitorTaskbar>{SyntheticTaskbar()};
+  };
+  ModelInbox inbox;
+  TrayModel model;
+  OverlayThread thread;
+  ASSERT_TRUE(thread.Start(&inbox, &model, enumerate, {},
+                           OpenPromotionScratch));
+  const HWND ui = thread.uiHwnd();
+  ASSERT_NE(ui, nullptr);
+
+  inbox.Push(MakeAddFor(owner, 1, L"promoted first"));
+  // Sent, not posted: the record pushed above is drained either by this
+  // call or by the message already queued ahead of it.
+  SendMessageW(ui, traymirror::kMsgInbox, 0, 0);
+
+  WritePromotionEntry(0);
+  SendMessageW(ui, traymirror::kMsgPromotion, 0, 0);
+  thread.Stop();
+
+  ASSERT_EQ(model.icons().size(), 1U);
+  EXPECT_FALSE(model.icons()[0].promoted);
+
+  DestroyWindow(owner);
+  RegDeleteTreeW(HKEY_CURRENT_USER, kPromotionScratch);
 }
