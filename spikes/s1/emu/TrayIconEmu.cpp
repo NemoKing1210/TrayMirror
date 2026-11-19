@@ -33,6 +33,7 @@ struct Options {
   bool hidden = false;
   bool guid = false;
   bool readdOnTaskbarCreated = false;
+  bool menu = false;  // show a real TrackPopupMenu on a right-click callback (S5)
   std::wstring balloonTitle = L"EmuTitle";
   std::wstring balloonText = L"EmuText";
 };
@@ -87,6 +88,15 @@ const wchar_t* KnownMessageName(UINT msg, UINT callback, UINT taskbarCreated) {
   if (msg == WM_DESTROY) return L"WM_DESTROY";
   if (msg == WM_NCDESTROY) return L"WM_NCDESTROY";
   if (msg == WM_TIMER) return L"WM_TIMER";
+  // S5 (menu behavior): the messages a real owner sees around a menu.
+  if (msg == WM_ACTIVATE) return L"WM_ACTIVATE";
+  if (msg == WM_ACTIVATEAPP) return L"WM_ACTIVATEAPP";
+  if (msg == WM_KILLFOCUS) return L"WM_KILLFOCUS";
+  if (msg == WM_SETFOCUS) return L"WM_SETFOCUS";
+  if (msg == WM_COMMAND) return L"WM_COMMAND";
+  if (msg == WM_ENTERIDLE) return L"WM_ENTERIDLE";
+  if (msg == WM_UNINITMENUPOPUP) return L"WM_UNINITMENUPOPUP";
+  if (msg == WM_CANCELMODE) return L"WM_CANCELMODE";
   return L"";
 }
 
@@ -224,6 +234,63 @@ void ReAddAllIcons() {
   EmuLogf(L"TASKBARCREATED re-add %d/%d (no NIF_INFO)", readded, g_opts.count);
 }
 
+// --- S5: menu behavior (stage 3 measurement) ------------------------------------
+
+// A real TrackPopupMenu, exactly as an icon owner shows it after a
+// right-click callback. The modal menu loop re-enters EmuWndProc, so
+// every message the owner sees around the menu is journaled, and the
+// menu window's own rect is read from WM_ENTERIDLE (the only moment the
+// loop tells the owner it has gone idle).
+bool g_menuRectLogged = false;
+
+void LogMenuRect(HWND owner) {
+  GUITHREADINFO info = {};
+  info.cbSize = sizeof(info);
+  if (GetGUIThreadInfo(GetCurrentThreadId(), &info) == FALSE ||
+      info.hwndMenuOwner == nullptr) {
+    EmuLogf(L"MENU rect unavailable");
+    return;
+  }
+  // The popup menu window itself (#32768) is owned by the menu owner.
+  const HWND menu = FindWindowW(L"#32768", nullptr);
+  RECT rect = {};
+  if (menu == nullptr || GetWindowRect(menu, &rect) == FALSE) {
+    EmuLogf(L"MENU rect query failed");
+    return;
+  }
+  MONITORINFO mi = {};
+  mi.cbSize = sizeof(mi);
+  const HMONITOR monitor = MonitorFromWindow(menu, MONITOR_DEFAULTTONEAREST);
+  GetMonitorInfoW(monitor, &mi);
+  EmuLogf(L"MENU rect=%ld,%ld-%ld,%ld monitor=%ld,%ld primary=%d ownerFg=%d",
+          rect.left, rect.top, rect.right, rect.bottom, mi.rcMonitor.left,
+          mi.rcMonitor.top,
+          (mi.dwFlags & MONITORINFOF_PRIMARY) != 0 ? 1 : 0,
+          GetForegroundWindow() == owner ? 1 : 0);
+}
+
+void ShowMenu(HWND hwnd) {
+  HMENU menu = CreatePopupMenu();
+  if (menu == nullptr) return;
+  AppendMenuW(menu, MF_STRING, 1, L"Item one");
+  AppendMenuW(menu, MF_STRING, 2, L"Item two");
+  AppendMenuW(menu, MF_STRING, 3, L"Item three");
+  POINT pt = {};
+  GetCursorPos(&pt);
+  EmuLogf(L"MENU show at %ld,%ld ownerIsForeground=%d", pt.x, pt.y,
+          GetForegroundWindow() == hwnd ? 1 : 0);
+  SetForegroundWindow(hwnd);
+  EmuLogf(L"MENU after SetForegroundWindow ownerIsForeground=%d",
+          GetForegroundWindow() == hwnd ? 1 : 0);
+  g_menuRectLogged = false;
+  const int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y,
+                                 0, hwnd, nullptr);
+  EmuLogf(L"MENU closed cmd=%d ownerIsForeground=%d", cmd,
+          GetForegroundWindow() == hwnd ? 1 : 0);
+  PostMessageW(hwnd, WM_NULL, 0, 0);
+  DestroyMenu(menu);
+}
+
 // --- window ---------------------------------------------------------------------
 
 LRESULT CALLBACK EmuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -249,6 +316,20 @@ LRESULT CALLBACK EmuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     const POINTS point = MAKEPOINTS(coords);
     EmuLogf(L"callback detail uid=%u wParamPoint=%d,%d", iconId, point.x,
             point.y);
+    if (g_opts.menu) {
+      const UINT event = static_cast<UINT>(lParam) & 0xFFFFU;
+      // v4 owners open the menu on WM_CONTEXTMENU; v0 owners on
+      // WM_RBUTTONUP — both measured in S4 (report 07).
+      const bool rightClick = g_opts.v4 ? (event == WM_CONTEXTMENU)
+                                        : (event == WM_RBUTTONUP);
+      if (rightClick) {
+        ShowMenu(hwnd);
+      }
+    }
+  }
+  if (msg == WM_ENTERIDLE && wParam == MSGF_MENU && !g_menuRectLogged) {
+    g_menuRectLogged = true;
+    LogMenuRect(hwnd);
   }
   return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
@@ -309,6 +390,7 @@ void PrintUsage() {
       "  --hidden       NIF_STATE NIS_HIDDEN\n"
       "  --guid         NIF_GUID with the fixed marker GUID (payload measurement)\n"
       "  --readd-on-taskbarcreated   re-issue NIM_ADD (without NIF_INFO) on broadcast\n"
+      "  --menu         show a real TrackPopupMenu on the right-click callback (S5)\n"
       "  --title T --text X  balloon mode\n");
 }
 
@@ -334,6 +416,7 @@ bool ParseOptions(int argc, wchar_t** argv, Options* o) {
     else if (a == L"--hidden") o->hidden = true;
     else if (a == L"--guid") o->guid = true;
     else if (a == L"--readd-on-taskbarcreated") o->readdOnTaskbarCreated = true;
+    else if (a == L"--menu") o->menu = true;
     else if (a == L"--title" && i + 1 < argc) o->balloonTitle = argv[++i];
     else if (a == L"--text" && i + 1 < argc) o->balloonText = argv[++i];
     else return false;
