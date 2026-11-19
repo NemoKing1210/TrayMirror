@@ -22,8 +22,10 @@ jobs:
       # vcpkg is preinstalled on the image (manifest mode installs spdlog
       # and gtest during configure). Its location is published as
       # VCPKG_INSTALLATION_ROOT; the documented location is the fallback.
-      # Ninja is installed on demand so a missing tool cannot be mistaken
-      # for a project failure.
+      # The image's checkout can lag behind vcpkg.json's builtin-baseline,
+      # so the baseline commit is fetched when it is missing. Ninja is
+      # installed on demand so a missing tool cannot be mistaken for a
+      # project failure.
       - name: Locate the toolchain
         shell: pwsh
         run: |
@@ -35,6 +37,23 @@ jobs:
           }
           "TRAYMIRROR_VCPKG=$vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "vcpkg: $vcpkg"
+
+          $baseline = (Get-Content vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+          git -C $vcpkg cat-file -e "$baseline^{commit}" 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "fetching the vcpkg baseline commit $baseline"
+            git -C $vcpkg fetch origin $baseline 2>$null
+            if ($LASTEXITCODE -ne 0) {
+              if ((git -C $vcpkg rev-parse --is-shallow-repository) -eq 'true') {
+                git -C $vcpkg fetch --unshallow origin
+              } else {
+                git -C $vcpkg fetch origin
+              }
+            }
+            git -C $vcpkg cat-file -e "$baseline^{commit}"
+            if ($LASTEXITCODE -ne 0) { throw "vcpkg baseline $baseline is unavailable" }
+          }
+
           if (-not (Get-Command ninja.exe -ErrorAction SilentlyContinue)) {
             choco install ninja -y --no-progress
           }
