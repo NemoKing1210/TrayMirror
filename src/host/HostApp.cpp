@@ -312,13 +312,17 @@ int HostAppRun(const HostAppConfig& config) {
   }
 
   if (config.disableHook) {
-    // The manual kill switch, armed and left signaled (spec 7.3).
+    // The manual kill switch (spec 7.3): create, arm, and KEEP the
+    // handle for this process's lifetime. Closing it would destroy the
+    // named event outright when no other handle exists, and the armed
+    // state must stay observable while this process runs. The arm's
+    // audience is a resident hook in explorer (orphaned by a host
+    // crash); it holds its own handle, so the event outlives us there.
     HANDLE off = CreateEventW(nullptr, TRUE, FALSE, kOffEventName);
     if (off == nullptr) {
       return 4;
     }
     SetEvent(off);
-    CloseHandle(off);
     return 0;
   }
 

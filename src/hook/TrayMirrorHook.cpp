@@ -120,6 +120,38 @@ void HandleCopydata(const COPYDATASTRUCT* cds, HookState* st) {
 
 }  // namespace
 
+// DLL entry: release the IPC handles when the DLL unloads. Inside
+// explorer.exe this fires only after the host has unhooked and the
+// loader dropped the last reference — the session objects then die
+// with their last owner instead of per-load. In the unit/selftest
+// process this is what keeps test fixtures isolated. CloseHandle and
+// UnmapViewOfFile are non-blocking kernel32 calls: allowed under the
+// loader lock (spec 12.4).
+BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
+  if (reason == DLL_PROCESS_DETACH) {
+    if (g_state.header != nullptr) {
+      UnmapViewOfFile(
+          const_cast<uint8_t*>(reinterpret_cast<const volatile uint8_t*>(
+              g_state.header)));
+      g_state.header = nullptr;
+      g_state.ring = nullptr;
+    }
+    if (g_state.map != nullptr) {
+      CloseHandle(g_state.map);
+      g_state.map = nullptr;
+    }
+    if (g_state.signal != nullptr) {
+      CloseHandle(g_state.signal);
+      g_state.signal = nullptr;
+    }
+    if (g_state.off != nullptr) {
+      CloseHandle(g_state.off);
+      g_state.off = nullptr;
+    }
+  }
+  return TRUE;
+}
+
 LRESULT CALLBACK TrayHookProc(int code, WPARAM wp, LPARAM lp) {
   if (code == HC_ACTION) {
     HookState* st = &g_state;
