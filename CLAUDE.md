@@ -8,13 +8,17 @@ Project instructions for Claude Code. The canonical agent guidance lives in
 ## Claude-specific notes
 
 - **Safety gate.** The default in this repository is *no live-Explorer contact*.
-  Never run `TraySpikeCtl start`, `stop`, or `kill` against a real session unless
-  the user explicitly asks for a live run in the current message. `selftest` is
-  fine and is the expected verification for hook changes.
+  Never run the production host (`TrayMirror.exe` with no arguments — its
+  guarded run installs the hook into the live Explorer), `TraySpikeCtl start`,
+  `stop`, or `kill` against a real session unless the user explicitly asks for a
+  live run in the current message. `TrayMirror.exe --selftest` and
+  `TraySpikeCtl selftest` are fine and are the expected verification for hook
+  changes. Live acceptance runs are owner-executed via
+  `scripts\stage1-accept.ps1`.
 - **Verify before claiming done.** Run `scripts\build.ps1`, ctest (via the
   bundled CMake path, since ctest is not on `PATH`), and
-  `TraySpikeCtl.exe selftest`; report the real output. Do not report success
-  from memory or from an earlier run after changing code.
+  `.\build\src\host\TrayMirror.exe --selftest`; report the real output. Do not
+  report success from memory or from an earlier run after changing code.
 - **Language.** Discuss with the maintainer in the language they use (Russian is
   fine); everything committed — code, comments, docs, commit messages — is in
   English.

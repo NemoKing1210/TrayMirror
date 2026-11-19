@@ -12,9 +12,11 @@ monitors. The architecture is a minimal hook DLL inside `explorer.exe`
 (`WH_CALLWNDPROCRET` on the `Shell_TrayWnd` thread) plus a separate Host
 process that owns the model, rendering, and callbacks to icon owners.
 
-The repository is currently at **stage 0 — research spikes**. The stage 0 code
-(hook, controller, emulator, dump tool, tests) is complete; spike S1 returned
-**GO**. S2/S3 runs on a live Explorer are deferred to the project owner.
+The project has completed **stage 0 (research spikes, feasibility GO —
+ADR-0002)** and **stage 1 (skeleton — protocol, production hook, host,
+dump tool; acceptance PASS, ADR-0004)**. The next stage is **stage 2 —
+model and first rendering** (spec §9). Stage 0's spike tooling remains in
+`spikes/` as historical research; the production code lives in `src/`.
 
 ## Ground truth, in order
 
@@ -32,14 +34,17 @@ change.
 
 ## Hard safety rules
 
-- **Never install the hook into a live Explorer** — do not run
-  `TraySpikeCtl start`, `stop`, or `kill` against a real session unless the
-  project owner explicitly asks for it in the current task. Live-Explorer runs
-  are currently deferred by the owner's decision.
-- `TraySpikeCtl selftest` is safe and expected: it exercises the hook DLL in its
-  own process without contacting Explorer.
-- The kill switch (`Local\TrayMirrorSpike.Off`) must be verified by selftest
-  **before** any hook installation. This is a spec rule, not a suggestion.
+- **Never install a hook into a live Explorer** — do not run the production
+  host (`TrayMirror.exe` with no arguments), `TraySpikeCtl start`, `stop`, or
+  `kill` against a real session unless the project owner explicitly asks for it
+  in the current task. Live-Explorer acceptance runs are owner-executed via
+  `scripts\stage1-accept.ps1`.
+- `TrayMirror.exe --selftest` and `TraySpikeCtl selftest` are safe and
+  expected: they exercise the hook DLL in their own process without contacting
+  Explorer.
+- The kill switch (production: `Local\TrayMirror.Off`; spike:
+  `Local\TrayMirrorSpike.Off`) must be verified by selftest **before** any hook
+  installation. This is a spec rule, not a suggestion.
 - Emergency Explorer recovery (only if the owner asks for live testing):
   ```powershell
   taskkill /f /im explorer.exe; start explorer.exe
@@ -66,12 +71,13 @@ scripts\build.ps1 -Config Release
 $cmake = "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin"
 & "$cmake\ctest.exe" --test-dir build --output-on-failure
 
-.\build\spikes\s1\ctl\TraySpikeCtl.exe selftest
+.\build\src\host\TrayMirror.exe --selftest      # production: hook + ring in-process
+.\build\spikes\s1\ctl\TraySpikeCtl.exe selftest # spike tooling, if touched
 ```
 
-The build is MSVC-only with `/W4 /WX`: a warning is a build failure. The hook
-and the controller are x64-only; only the emulator/dump tools make sense as x86
-builds.
+The build is MSVC-only with `/W4 /WX`: a warning is a build failure. The
+production hook and host are x64-only; only the emulator/dump tools make sense
+as x86 builds.
 
 Before claiming a change is done, run the build, `ctest`, and the selftest, and
 report their actual output. Never claim success unverified.
@@ -80,20 +86,30 @@ report their actual output. Never claim success unverified.
 
 | Path | Contents |
 |---|---|
-| `spikes/common/` | Record format (`Record.h`), IPC names (`TraySpike.h`), unit test |
-| `spikes/s1/hook/` | `TrayMirrorSpikeHook.dll` — the only code that runs in Explorer |
+| `src/hook/` | `TrayMirrorHook.dll` — the only production code that runs in Explorer |
+| `src/host/` | `TrayMirror.exe` — host: install, reader thread, model, logging, selftest, clean shutdown; IPC in `ipc/` |
+| `src/proto/` | Record format, ring writer/reader, CRC, tray payload decode — shared by hook and host |
+| `src/tools/` | `TrayMirrorDump.exe` — passive snapshot dump of the production ring |
+| `tests/unit/` | Unit tests for proto, ring, hook, host, dump, shared ring, payload |
+| `tests/integration/` | Selftest integration and hook-latch tests |
+| `tests/fuzz/` | Deterministic parser fuzz (x64; runs under ctest) |
+| `spikes/common/` | Stage 0 record format (`Record.h`), IPC names (`TraySpike.h`), unit test |
+| `spikes/s1/hook/` | `TrayMirrorSpikeHook.dll` — stage 0 spike hook |
 | `spikes/s1/ctl/` | `TraySpikeCtl.exe` — start/stop/kill/status/selftest/broadcast |
 | `spikes/s1/emu/` | `TrayIconEmu.exe` — emulates applications, receives callbacks |
 | `spikes/s1/dump/` | `TraySpikeDump.exe` — log dump (`words`) and summary (`stats`) |
 | `scripts/build.ps1` | The only supported build entry point |
+| `scripts/stage1-accept.ps1` | Owner-run stage 1 acceptance runbook (live Explorer) |
+| `.github/workflows/ci.yml` | CI: build, ctest, selftest |
+| `vcpkg.json` | Dependencies (spdlog, gtest) |
 | `AGENTS.md` | These rules; the canonical agent guidance |
 | `CONTRIBUTING.md` | Contribution process, stage gates, review expectations |
 | `SECURITY.md` | Private vulnerability reporting, scope, privacy warning about logs |
 
 ## Working conventions
 
-- Work strictly by stages. Do not start stage 1 before the stage 0 feasibility
-  decision (spec §9) is recorded.
+- Work strictly by stages. Do not start a stage before the previous stage's
+  gate is closed and recorded (stage 1 closed — ADR-0004; stage 2 next).
 - One task per commit, with tests and documentation updates.
 - Record every significant decision in the project decision log; record spike
   measurements in the spike reports; update the project status at stage
