@@ -5,7 +5,9 @@
 #pragma once
 
 #include "dispatch/Dispatch.h"
+#include "render/Flyout.h"
 #include "render/IconCache.h"
+#include "render/IconView.h"
 #include "render/Tooltip.h"
 
 #include <windows.h>
@@ -22,19 +24,6 @@
 #include <vector>
 
 namespace traymirror {
-
-// A non-owning view of one model icon, as the overlay renders it. The
-// icon handle belongs to the model and outlives the view.
-struct IconView {
-  HICON icon = nullptr;
-  UINT serial = 0;
-  std::wstring tip;
-  DispatchTarget target;  // where clicks on this icon are replayed
-};
-
-// Where a click on a mirrored icon goes; the overlay never contacts the
-// owner itself (spec 4.4).
-using DispatchClick = std::function<void(const DispatchCall&)>;
 
 // Strip-local hit test over the drawn cells; true and the cell index on
 // a hit (the gap between cells is not a hit).
@@ -55,7 +44,10 @@ class Overlay {
 
   [[nodiscard]] HWND hwnd() const noexcept { return hwnd_; }
   // Replaces the icon list; marks the strip dirty. HICONs are borrowed.
-  void SetIcons(std::vector<IconView> icons);
+  // `overflow` are the icons the strip does not show: when it is not
+  // empty the strip draws a chevron that opens the flyout (spec 6.4).
+  void SetIcons(std::vector<IconView> icons,
+                std::vector<IconView> overflow = {});
   // Redraws only when dirty (spec 6.2: no timer, no polling).
   void Render();
 
@@ -75,7 +67,12 @@ class Overlay {
   static void DrawPlaceholder(ID2D1DeviceContext* dc, const D2D1_RECT_F& cell);
   void DrawHighlight(ID2D1DeviceContext* dc,
                      const D2D1_RECT_F& cell) const;
+  void DrawChevron(ID2D1DeviceContext* dc, const D2D1_RECT_F& cell) const;
   void HandleMouseMove(HWND hwnd, POINT pt);
+  // True when the click landed on the chevron and was consumed.
+  bool HandleChevronClick(POINT pt);
+  void ToggleFlyout();
+  void CloseFlyout();
   void DispatchGesture(TrayEvent event, POINT pt);
   void DispatchLeave();
   void ClearHover();
@@ -89,8 +86,15 @@ class Overlay {
   bool dark_ = false;
   bool tracking_ = false;
   size_t hovered_ = kNoHover;
+  bool chevronHovered_ = false;
+  bool hasChevron_ = false;
+  RECT chevronCell_ = {};
   std::unique_ptr<Tooltip> tooltip_;
+  // Open only while the user has it up; closed on Esc, outside click, a
+  // model change or a click on one of its cells (R7: destroyed, not hidden).
+  std::unique_ptr<Flyout> flyout_;
   std::vector<IconView> icons_;
+  std::vector<IconView> overflow_;
   std::vector<RECT> cells_;  // strip-local, one per drawn icon (hit-testing)
   std::function<void()> onGeometryInvalidated_;
   DispatchClick onClick_;

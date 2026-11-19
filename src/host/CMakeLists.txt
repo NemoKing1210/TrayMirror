@@ -12,6 +12,7 @@ add_library(traymirror_host STATIC
             dispatch/Dispatch.cpp
             win/Monitors.cpp
             render/Overlay.cpp render/OverlayThread.cpp
+            render/CellLayout.cpp render/Flyout.cpp
             render/IconCache.cpp render/Tooltip.cpp)
 target_include_directories(traymirror_host PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(traymirror_host

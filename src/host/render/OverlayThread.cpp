@@ -209,11 +209,12 @@ void OverlayThread::BuildOverlays() {
   if (!enumerate_) {
     return;
   }
-  // The strip must be wide enough for every visible icon: the tail is
-  // clipped, and a newly added icon would otherwise be invisible and
-  // unclickable (12 slots is only the minimum).
-  const size_t slots = std::max<size_t>(
-      static_cast<size_t>(kStripIconSlots), CountVisibleIcons());
+  // The strip must be wide enough for every visible icon plus the
+  // overflow chevron: the tail is clipped, and a newly added icon would
+  // otherwise be invisible and unclickable (12 slots is only the minimum).
+  const size_t slots =
+      std::max<size_t>(static_cast<size_t>(kStripIconSlots),
+                       CountVisibleIcons() + 1);
   builtSlots_ = slots;
   const HWND ui = uiHwnd_.load();
   for (const MonitorTaskbar& mt : enumerate_()) {
@@ -304,8 +305,10 @@ void OverlayThread::PushModelToOverlays() {
   if (model_ == nullptr || overlays_.empty()) {
     return;
   }
-  std::vector<IconView> icons;
-  icons.reserve(model_->icons().size());
+  std::vector<IconView> strip;
+  std::vector<IconView> overflow;
+  strip.reserve(model_->icons().size());
+  overflow.reserve(model_->icons().size());
   // Newest first: the strip clips its tail when the tray is bigger than
   // the taskbar can show, and the icon that just registered is the one
   // the user is looking for. Oldest icons are the ones that clip.
@@ -315,25 +318,33 @@ void OverlayThread::PushModelToOverlays() {
     if (icon.hidden()) {
       continue;
     }
-    icons.push_back(
-        IconView{.icon = icon.iconCopy,
-                 .serial = icon.iconSerial,
-                 .tip = icon.tip,
-                 .target = DispatchTarget{.owner = icon.ownerHwnd,
-                                          .callbackMessage = icon.callbackMessage,
-                                          .uid = icon.key.uid,
-                                          .version = icon.version,
-                                          .ownerPid = icon.ownerPid}});
+    IconView view{
+        .icon = icon.iconCopy,
+        .serial = icon.iconSerial,
+        .tip = icon.tip,
+        .target = DispatchTarget{.owner = icon.ownerHwnd,
+                                 .callbackMessage = icon.callbackMessage,
+                                 .uid = icon.key.uid,
+                                 .version = icon.version,
+                                 .ownerPid = icon.ownerPid}};
+    // Stage 3 (spec 4.5/6.4): the registry promotion decides strip cell
+    // versus overflow; the strip draws a chevron for whatever it hides.
+    if (icon.promoted) {
+      strip.push_back(std::move(view));
+    } else {
+      overflow.push_back(std::move(view));
+    }
   }
   for (const std::unique_ptr<Overlay>& overlay : overlays_) {
-    overlay->SetIcons(icons);
+    overlay->SetIcons(strip, overflow);
     overlay->Render();
   }
   // The model outgrew the strip: rebuild it wider so no icon is hidden.
   // Not reposted when the taskbar has no more room, so a saturated strip
   // cannot cause a rebuild loop.
+  const size_t needed = strip.size() + (overflow.empty() ? 0U : 1U);
   const HWND ui = uiHwnd_.load();
-  if (!stripRoomExhausted_ && icons.size() > builtSlots_ && ui != nullptr) {
+  if (!stripRoomExhausted_ && needed > builtSlots_ && ui != nullptr) {
     PostMessageW(ui, kMsgRebuild, 0, 0);
   }
 }

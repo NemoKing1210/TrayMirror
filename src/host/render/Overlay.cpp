@@ -1,6 +1,7 @@
 #include "render/Overlay.h"
 
 #include "Log.h"
+#include "render/CellLayout.h"
 #include "win/Monitors.h"
 
 #include <d2d1helper.h>
@@ -15,6 +16,10 @@ namespace traymirror {
 namespace {
 
 constexpr wchar_t kOverlayClass[] = L"TrayMirrorOverlay";
+
+// Posted by an open flyout after it destroys itself: the reset happens
+// outside the flyout's own message handler, so no object dies mid-frame.
+constexpr UINT kMsgFlyoutClosed = WM_APP + 4;
 
 // Solid taskbar colors used until the stage 2 visual pass pins the exact
 // system values (spec 6.3): the Win11 light and dark taskbar tones.
@@ -98,11 +103,14 @@ LRESULT Overlay::HandleMessage(HWND hwnd, UINT message, WPARAM wparam,
                       POINT{.x = GET_X_LPARAM(lparam),
                             .y = GET_Y_LPARAM(lparam)});
       return 0;
-    case WM_LBUTTONUP:
-      DispatchGesture(TrayEvent::kLeftUp,
-                      POINT{.x = GET_X_LPARAM(lparam),
-                            .y = GET_Y_LPARAM(lparam)});
+    case WM_LBUTTONUP: {
+      const POINT pt = {.x = GET_X_LPARAM(lparam), .y = GET_Y_LPARAM(lparam)};
+      if (HandleChevronClick(pt)) {
+        return 0;  // the chevron is not an icon: nothing is dispatched
+      }
+      DispatchGesture(TrayEvent::kLeftUp, pt);
       return 0;
+    }
     case WM_LBUTTONDBLCLK:
       DispatchGesture(TrayEvent::kLeftDblClk,
                       POINT{.x = GET_X_LPARAM(lparam),
@@ -121,6 +129,9 @@ LRESULT Overlay::HandleMessage(HWND hwnd, UINT message, WPARAM wparam,
     case WM_MOUSELEAVE:
       DispatchLeave();
       ClearHover();
+      return 0;
+    case kMsgFlyoutClosed:
+      flyout_.reset();  // its window is already gone
       return 0;
     case WM_SETTINGCHANGE:
       ApplyTheme();
@@ -183,6 +194,9 @@ std::unique_ptr<Overlay> Overlay::Create(
 }
 
 Overlay::~Overlay() {
+  if (flyout_ != nullptr) {
+    flyout_->Close();  // its window must die before ours
+  }
   ReleaseComposition();
   if (hwnd_ != nullptr) {
     DestroyWindow(hwnd_);
@@ -190,8 +204,13 @@ Overlay::~Overlay() {
   }
 }
 
-void Overlay::SetIcons(std::vector<IconView> icons) {
+void Overlay::SetIcons(std::vector<IconView> icons,
+                       std::vector<IconView> overflow) {
+  if (flyout_ != nullptr) {
+    CloseFlyout();  // the model changed under an open flyout
+  }
   icons_ = std::move(icons);
+  overflow_ = std::move(overflow);
   dirty_ = true;
 }
 
@@ -335,11 +354,24 @@ void Overlay::HandleMouseMove(HWND hwnd, POINT pt) {
   }
   size_t index = kNoHover;
   if (!HitTestIcon(cells_, pt, &index)) {
+    // The chevron is a cell of the strip but not an icon: it highlights
+    // without a tooltip and without a gesture to any owner.
+    const bool onChevron = hasChevron_ && PtInRect(&chevronCell_, pt) != 0;
+    if (chevronHovered_ != onChevron) {
+      chevronHovered_ = onChevron;
+      dirty_ = true;
+      Render();
+    }
     if (hovered_ != kNoHover) {
       DispatchLeave();  // the pointer left the icon for the gap
     }
     ClearHover();
     return;
+  }
+  if (chevronHovered_) {
+    chevronHovered_ = false;
+    dirty_ = true;
+    Render();
   }
   if (index == hovered_) {
     return;
@@ -367,6 +399,42 @@ void Overlay::HandleMouseMove(HWND hwnd, POINT pt) {
   }
   // The pointer entered this cell: v4 owners get NIN_POPUPOPEN (report 07).
   DispatchGesture(TrayEvent::kMouseEnter, pt);
+}
+
+bool Overlay::HandleChevronClick(POINT pt) {
+  if (!hasChevron_ || PtInRect(&chevronCell_, pt) == 0) {
+    return false;
+  }
+  ToggleFlyout();
+  return true;
+}
+
+void Overlay::ToggleFlyout() {
+  if (flyout_ != nullptr) {
+    CloseFlyout();
+    return;
+  }
+  if (overflow_.empty() || hwnd_ == nullptr) {
+    return;
+  }
+  // The owner is told after the window is gone; the reset below happens
+  // on the message loop, never inside the flyout's own handler.
+  flyout_ = Flyout::Create(monitor_, strip_, overflow_, onClick_, [this]() {
+    if (hwnd_ != nullptr) {
+      PostMessageW(hwnd_, kMsgFlyoutClosed, 0, 0);
+    }
+  });
+}
+
+void Overlay::CloseFlyout() {
+  if (flyout_ == nullptr) {
+    return;
+  }
+  if (flyout_->hwnd() != nullptr) {
+    flyout_->Close();  // posts kMsgFlyoutClosed; the window is gone now
+  } else {
+    flyout_.reset();  // already closed; its post is still in flight
+  }
 }
 
 void Overlay::DispatchGesture(TrayEvent event, POINT pt) {
@@ -433,28 +501,28 @@ bool HitTestIcon(const std::vector<RECT>& cells, POINT pt, size_t* index) {
 }
 
 void Overlay::DrawIcons(ID2D1DeviceContext* dc, int width, int height) {
-  cells_.clear();
   UINT dpi = GetDpiForWindow(hwnd_);
   if (dpi == 0) {
     dpi = 96;
   }
   const int iconPx = IconPxForDpi(dpi);
   const int gap = IconGapPxForDpi(dpi);
-  const int top = (height - iconPx) / 2;
+  const StripLayout layout =
+      LayoutStrip(width, height, iconPx, gap, icons_.size(), !overflow_.empty());
+  cells_ = layout.icons;
+  hasChevron_ = layout.hasChevron;
+  chevronCell_ = layout.chevron;
   std::set<IconCacheKey> live;
-  int x = 0;
-  for (size_t i = 0; i < icons_.size(); ++i) {
+  for (size_t i = 0; i < cells_.size(); ++i) {
     const IconView& icon = icons_[i];
-    if (x + iconPx > width) {
-      break;  // the tail is clipped: stage 2 has no chevron (R6)
-    }
+    const RECT& rect = cells_[i];
+    const D2D1_RECT_F cell =
+        D2D1::RectF(static_cast<float>(rect.left), static_cast<float>(rect.top),
+                    static_cast<float>(rect.right),
+                    static_cast<float>(rect.bottom));
     ID2D1Bitmap* bitmap = cache_.Get(icon.icon, icon.serial, iconPx);
     live.insert(
         IconCacheKey{.icon = icon.icon, .serial = icon.serial, .px = iconPx});
-    const D2D1_RECT_F cell =
-        D2D1::RectF(static_cast<float>(x), static_cast<float>(top),
-                    static_cast<float>(x + iconPx),
-                    static_cast<float>(top + iconPx));
     if (i == hovered_) {
       DrawHighlight(dc, cell);
     }
@@ -463,11 +531,17 @@ void Overlay::DrawIcons(ID2D1DeviceContext* dc, int width, int height) {
     } else {
       DrawPlaceholder(dc, cell);
     }
-    cells_.push_back(RECT{.left = x,
-                          .top = top,
-                          .right = x + iconPx,
-                          .bottom = top + iconPx});
-    x += iconPx + gap;
+  }
+  if (hasChevron_) {
+    const D2D1_RECT_F cell = D2D1::RectF(
+        static_cast<float>(chevronCell_.left),
+        static_cast<float>(chevronCell_.top),
+        static_cast<float>(chevronCell_.right),
+        static_cast<float>(chevronCell_.bottom));
+    if (chevronHovered_) {
+      DrawHighlight(dc, cell);
+    }
+    DrawChevron(dc, cell);
   }
   cache_.Prune(live);
 }
@@ -483,6 +557,29 @@ void Overlay::DrawHighlight(ID2D1DeviceContext* dc,
     return;
   }
   dc->FillRoundedRectangle(D2D1::RoundedRect(cell, 4.0F, 4.0F), brush.Get());
+}
+
+void Overlay::DrawChevron(ID2D1DeviceContext* dc,
+                          const D2D1_RECT_F& cell) const {
+  Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
+  const D2D1_COLOR_F color =
+      dark_ ? D2D1_COLOR_F{.r = 0.95F, .g = 0.95F, .b = 0.95F, .a = 0.85F}
+            : D2D1_COLOR_F{.r = 0.10F, .g = 0.10F, .b = 0.10F, .a = 0.75F};
+  if (FAILED(dc->CreateSolidColorBrush(color, brush.GetAddressOf())) != 0 ||
+      brush == nullptr) {
+    return;
+  }
+  const float midX = (cell.left + cell.right) / 2.0F;
+  const float midY = (cell.top + cell.bottom) / 2.0F;
+  const float half = (cell.right - cell.left) / 4.0F;
+  const float tenth = (cell.right - cell.left) / 10.0F;
+  const float stroke = tenth > 1.0F ? tenth : 1.0F;
+  // A "^" pointing up: the flyout opens above the strip.
+  dc->DrawLine(D2D1::Point2F(midX - half, midY + (half / 2.0F)),
+               D2D1::Point2F(midX, midY - (half / 2.0F)), brush.Get(), stroke);
+  dc->DrawLine(D2D1::Point2F(midX, midY - (half / 2.0F)),
+               D2D1::Point2F(midX + half, midY + (half / 2.0F)), brush.Get(),
+               stroke);
 }
 
 void Overlay::DrawPlaceholder(ID2D1DeviceContext* dc,
