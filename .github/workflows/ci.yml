@@ -53,6 +53,13 @@ jobs:
             git -C $vcpkg cat-file -e "$baseline^{commit}"
             if ($LASTEXITCODE -ne 0) { throw "vcpkg baseline $baseline is unavailable" }
           }
+          # The ports and the version database must be the same commit:
+          # the image's worktree can be newer than the baseline, and then
+          # a port asks for a dependency version the baseline database
+          # does not know ("no version database entry for fmt at ...").
+          git -C $vcpkg checkout --quiet --force $baseline
+          if ($LASTEXITCODE -ne 0) { throw "cannot check out the vcpkg baseline $baseline" }
+          Write-Host "vcpkg checked out at $baseline"
 
           if (-not (Get-Command ninja.exe -ErrorAction SilentlyContinue)) {
             choco install ninja -y --no-progress
