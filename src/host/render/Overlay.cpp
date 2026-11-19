@@ -389,11 +389,13 @@ void Overlay::HandleMouseMove(HWND hwnd, POINT pt) {
     tooltip_ = Tooltip::Create(hwnd);
   }
   if (tooltip_ != nullptr && icons_[index].tip[0] != L'\0') {
+    // The tooltip places itself above the icon's screen rect (spec 6.4).
     const RECT& cell = cells_[index];
-    const POINT anchor = {
-        .x = strip_.left + cell.left + ((cell.right - cell.left) / 2),
-        .y = strip_.top - 4};
-    tooltip_->Show(icons_[index].tip, anchor);
+    const RECT iconRect = {.left = strip_.left + cell.left,
+                           .top = strip_.top + cell.top,
+                           .right = strip_.left + cell.right,
+                           .bottom = strip_.top + cell.bottom};
+    tooltip_->Show(icons_[index].tip, iconRect);
   } else if (tooltip_ != nullptr) {
     tooltip_->Hide();
   }

@@ -44,27 +44,23 @@ using traymirror::TrayModel;
 // so the strip contents depend only on the model they push.
 HKEY NoPromotionStore() { return nullptr; }
 
-// The system tooltip window is a top-level window of class
-// tooltips_class32 owned by the overlay. Found by enumeration so the
-// test never depends on the tooltip's own internals.
-HWND g_tooltipOwner = nullptr;
+// The tooltip is our own layered window of class TrayMirrorTooltip
+// (spec 6.4, report 09) and carries the shown text as its window title.
+// Found by enumeration so the test never depends on the tooltip's
+// internals.
 HWND g_tooltipFound = nullptr;
 
 BOOL CALLBACK FindTooltipProc(HWND hwnd, LPARAM /*unused*/) {
   wchar_t cls[64] = {};
   if (GetClassNameW(hwnd, cls, static_cast<int>(std::size(cls))) == 0 ||
-      wcscmp(cls, L"tooltips_class32") != 0) {
-    return TRUE;
-  }
-  if (GetWindow(hwnd, GW_OWNER) != g_tooltipOwner) {
+      wcscmp(cls, L"TrayMirrorTooltip") != 0) {
     return TRUE;
   }
   g_tooltipFound = hwnd;
   return FALSE;
 }
 
-HWND FindOwnedTooltip(HWND owner) {
-  g_tooltipOwner = owner;
+HWND FindTooltip() {
   g_tooltipFound = nullptr;
   EnumWindows(FindTooltipProc, 0);
   return g_tooltipFound;
@@ -213,13 +209,32 @@ int OverlayWidth() {
   return width;
 }
 
+// The owner every synthetic icon points at: a real message-only window,
+// because the overlay drops icons whose owner window is gone (stage 3,
+// task 6) and a made-up handle would be pruned on the first hover.
+HWND SyntheticTrayOwner() {
+  static const HWND owner = []() {
+    constexpr wchar_t kClass[] = L"TrayMirrorSyntheticTrayOwner";
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = kClass;
+    RegisterClassExW(&wc);
+    return CreateWindowExW(0, kClass, L"", 0, 0, 0, 0, 0, HWND_MESSAGE,
+                           nullptr, wc.hInstance, nullptr);
+  }();
+  return owner;
+}
+
 TrayMessage MakeAdd(uint32_t uid, const wchar_t* tip) {
   constexpr uint32_t kNifMessage = 0x1;
   constexpr uint32_t kNifIcon = 0x2;
   constexpr uint32_t kNifTip = 0x4;
   TrayMessage msg = {};
   msg.nim = 0;
-  msg.hwnd = 0x1234;
+  msg.hwnd = static_cast<uint32_t>(
+      reinterpret_cast<uintptr_t>(SyntheticTrayOwner()));
   msg.uid = uid;
   msg.flags = kNifMessage | kNifIcon | kNifTip;
   msg.callbackMsg = 0x13A0;
@@ -310,16 +325,14 @@ TEST(OverlaySmoke, TooltipShowsAndHides) {
   SendMessageW(overlay->hwnd(), WM_MOUSEMOVE, 0,
                MAKELPARAM(inside.x, inside.y));
 
-  const HWND tip = FindOwnedTooltip(overlay->hwnd());
+  // The tooltip is our own layered window (spec 6.4, report 09), not the
+  // system tooltips_class32 one it used to be, so its text is the window
+  // title rather than TTM_GETTEXT.
+  const HWND tip = FindTooltip();
   ASSERT_NE(tip, nullptr);
   EXPECT_NE(IsWindowVisible(tip), FALSE);
   wchar_t text[128] = {};
-  TOOLINFOW info = {};
-  info.cbSize = sizeof(info);
-  info.hwnd = overlay->hwnd();
-  info.uId = reinterpret_cast<UINT_PTR>(overlay->hwnd());
-  info.lpszText = text;
-  SendMessageW(tip, TTM_GETTEXTW, 128, reinterpret_cast<LPARAM>(&info));
+  EXPECT_GT(GetWindowTextW(tip, text, static_cast<int>(std::size(text))), 0);
   EXPECT_STREQ(text, L"first tip");
 
   SendMessageW(overlay->hwnd(), WM_MOUSELEAVE, 0, 0);
@@ -500,16 +513,11 @@ TEST(OverlayStrip, NewestIconIsLeftmost) {
        waited += 50) {
     Sleep(50);
     SendMessageW(overlay, WM_MOUSEMOVE, 0, MAKELPARAM(4, height / 2));
-    const HWND tip = FindOwnedTooltip(overlay);
+    const HWND tip = FindTooltip();
     if (tip == nullptr) {
       continue;
     }
-    TOOLINFOW info = {};
-    info.cbSize = sizeof(info);
-    info.hwnd = overlay;
-    info.uId = reinterpret_cast<UINT_PTR>(overlay);
-    info.lpszText = text;
-    SendMessageW(tip, TTM_GETTEXTW, 128, reinterpret_cast<LPARAM>(&info));
+    GetWindowTextW(tip, text, static_cast<int>(std::size(text)));
   }
   EXPECT_STREQ(text, L"third");
 

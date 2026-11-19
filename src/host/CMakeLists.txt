@@ -19,7 +19,7 @@ target_link_libraries(traymirror_host
                       PUBLIC traymirror_proto
                       PRIVATE spdlog::spdlog Threads::Threads
                               uiautomationcore ole32 oleaut32
-                              d2d1 dcomp d3d11 dxgi dwmapi shcore comctl32
+                              d2d1 dwrite dcomp d3d11 dxgi dwmapi shcore comctl32
                               advapi32)
 
 add_executable(TrayMirror main.cpp)
