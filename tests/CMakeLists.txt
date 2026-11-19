@@ -5,4 +5,5 @@
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
   add_subdirectory(unit)
   add_subdirectory(integration)
+  add_subdirectory(fuzz)
 endif()
