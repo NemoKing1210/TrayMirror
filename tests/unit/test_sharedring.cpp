@@ -236,4 +236,19 @@ TEST(SharedRingAdopt, ForeignHeaderSizeIsRefused) {
   ReleaseForeignRing(&fr);
 }
 
+TEST(SharedRingDacl, BuilderProducesAValidUserSystemDescriptor) {
+  // The mapping''s security attributes are built explicitly (spec 3.1:
+  // current user and SYSTEM only). The builder must succeed on a
+  // normal token and produce a valid descriptor the caller can verify:
+  // a failure here is a hard create error, never a default-DACL
+  // fallback.
+  SECURITY_ATTRIBUTES sa = {};
+  wchar_t err[256] = {};
+  ASSERT_TRUE(BuildRingSecurityAttributes(&sa, err, 256)) << err;
+  EXPECT_NE(sa.lpSecurityDescriptor, nullptr);
+  EXPECT_NE(IsValidSecurityDescriptor(sa.lpSecurityDescriptor), 0);
+  EXPECT_EQ(sa.nLength, sizeof(sa));
+  LocalFree(sa.lpSecurityDescriptor);
+}
+
 }  // namespace

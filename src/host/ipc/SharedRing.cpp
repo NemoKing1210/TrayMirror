@@ -40,28 +40,43 @@ std::wstring CurrentUserSid() {
 
 }  // namespace
 
+bool BuildRingSecurityAttributes(SECURITY_ATTRIBUTES* sa, wchar_t* errBuf,
+                                 size_t errCap) {
+  *sa = {};
+  sa->nLength = sizeof(*sa);
+
+  // DACL: current user and LOCAL SYSTEM only (spec 3.1). Any failure
+  // here is a hard create error: a default-DACL fallback would
+  // silently broaden access to the shared ring.
+  const std::wstring sid = CurrentUserSid();
+  if (sid.empty()) {
+    SetErr(errBuf, errCap, L"CurrentUserSid failed");
+    return false;
+  }
+  const std::wstring sddl = L"D:P(A;;GA;;;SY)(A;;GA;;;" + sid + L")";
+  if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+          sddl.c_str(), SDDL_REVISION_1, &sa->lpSecurityDescriptor,
+          nullptr) == 0) {
+    SetErr(errBuf, errCap, L"SDDL-to-descriptor conversion failed");
+    return false;
+  }
+  return true;
+}
+
 bool SharedRingCreate(SharedRingHandle* out, DWORD explorerPid,
                       wchar_t* errBuf, size_t errCap) {
   *out = {};
 
-  // DACL: current user and LOCAL SYSTEM only (spec 3.1).
-  const std::wstring sddl = L"D:P(A;;GA;;;SY)(A;;GA;;;" + CurrentUserSid() +
-                            L")";
   SECURITY_ATTRIBUTES sa = {};
-  sa.nLength = sizeof(sa);
-  SECURITY_ATTRIBUTES* saPtr = nullptr;
-  if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
-          sddl.c_str(), SDDL_REVISION_1, &sa.lpSecurityDescriptor,
-          nullptr) != 0) {
-    saPtr = &sa;
+  if (!BuildRingSecurityAttributes(&sa, errBuf, errCap)) {
+    return false;
   }
+  SECURITY_ATTRIBUTES* saPtr = &sa;
 
   const SIZE_T viewSize = sizeof(RingHeader) + kRingSizeBytes;
   HANDLE map = CreateFileMappingW(INVALID_HANDLE_VALUE, saPtr, PAGE_READWRITE,
                                   0, static_cast<DWORD>(viewSize), kRingName);
-  if (saPtr != nullptr) {
-    LocalFree(sa.lpSecurityDescriptor);
-  }
+  LocalFree(sa.lpSecurityDescriptor);
   if (map == nullptr) {
     SetErr(errBuf, errCap, L"CreateFileMappingW failed");
     return false;

@@ -20,6 +20,14 @@ struct SharedRingHandle {
   volatile uint8_t* ring = nullptr;
 };
 
+// Builds the SECURITY_ATTRIBUTES for the ring mapping: a DACL of the
+// current user and LOCAL SYSTEM only (spec 3.1). Returns false with a
+// message when the user SID or the SDDL conversion fails. Callers must
+// treat a failure as a hard create error — a default-DACL fallback
+// would silently broaden access.
+bool BuildRingSecurityAttributes(SECURITY_ATTRIBUTES* sa, wchar_t* errBuf,
+                                 size_t errCap);
+
 // Creates `Local\TrayMirror.Ring.v<version>` (size: header + ring) with
 // DACL S-1-5-18 (SYSTEM) + current user, and the auto-reset signal event
 // `Local\TrayMirror.Signal`. A mapping that already exists is ADOPTED
