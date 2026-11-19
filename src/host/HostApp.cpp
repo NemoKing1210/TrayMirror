@@ -190,9 +190,14 @@ bool HostAppSelftest() {
         &failed);
   }
 
-  // Scenario 3: oversize cbData → truncated to the payload cap.
+  // Scenario 3: oversize cbData → truncated to the payload cap. The
+  // source buffer is genuinely kMaxPayloadBytes large: the scenario
+  // tests the CAP (cbData far above it), not an unreadable source —
+  // scenario 4 covers that. A too-small source made the outcome depend
+  // on heap layout (the capped copy sometimes crossed into an
+  // unmapped page → SEH → header-only → flaky FAIL).
   {
-    std::vector<uint8_t> big(kTrayPayloadSize, 0);
+    std::vector<uint8_t> big(kMaxPayloadBytes, 0);
     SelftestCall c;
     BuildSelftestCall(&c, 1, big.data(), kMaxPayloadBytes * 4);
     api.proc(0, 0, reinterpret_cast<LPARAM>(&c.cwp));
